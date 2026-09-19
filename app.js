@@ -566,8 +566,7 @@
 
       var gutter = h('div', { className: 'urb-gutter' },
         hours.map(function (hr) { return h('div', { key: hr, className: 'urb-hour-row', style: { height: PX + 'px' } },
-          hr === H0 ? null : h('span', { className: 'urb-hour-label' }, this.hh(hr) + ':00'),
-          h('span', { className: 'urb-hour-label urb-hour-label-ten', style: { top: ((10 / 60) * PX - 7) + 'px' } }, this.hh(hr) + ':10')
+          h('span', { className: 'urb-hour-label', style: { top: ((10 / 60) * PX - 7) + 'px' } }, this.hh(hr) + ':10')
         ); }, this)
       );
       var tenPastLines = hours.map(function (hr) { return h('div', { key: 'ten' + hr, className: 'urb-tenpast-line', style: { top: ((hr - H0 + 10 / 60) * PX) + 'px' } }); });
@@ -655,10 +654,6 @@
               h('input', { type: 'checkbox', checked: !!f.isPodcast, onChange: function (e) { this.setField('isPodcast', e.target.checked); }.bind(this) }),
               'Podcast recording'
             ),
-            this.state.admin ? h('label', { className: 'urb-chip' },
-              h('input', { type: 'checkbox', checked: !!f.admin, onChange: function (e) { this.setField('admin', e.target.checked); }.bind(this) }),
-              'Admin-locked'
-            ) : null,
             this.state.formError ? h('div', { className: 'urb-error-box' }, this.state.formError) : null,
             h('div', { className: 'urb-actions' },
               f.id ? h('button', { className: this.btnClass('danger'), disabled: this.state.saving, onClick: this.deleteBooking.bind(this) }, 'Delete') : null,
@@ -799,7 +794,7 @@
     /* ---------- top level ---------- */
     render() {
       var studioName = this.state.studio === 1 ? 'Studio One' : 'Studio Two';
-      var studioDesc = this.state.studio === 1 ? 'The Radio Studio' : 'The DJ Booth';
+      var studioDesc = this.state.studio === 1 ? 'Radio Studio' : 'DJ Booth';
       var idleAnim = this.state.idle && this.state.loadPhase === 'done';
 
       return h('div', { className: 'urb-page' },

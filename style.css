@@ -115,7 +115,6 @@ button{-webkit-tap-highlight-color:transparent;}
 @media (min-width:760px){ .urb-gutter{flex-basis:56px;} }
 .urb-hour-row{position:relative;border-bottom:1px solid var(--line);}
 .urb-hour-label{position:absolute;top:-7px;right:5px;font-size:10.5px;font-weight:700;color:var(--faint);background:var(--panel-alt);padding-left:3px;}
-.urb-hour-label-ten{font-size:9.5px;font-weight:600;color:var(--faint);opacity:.75;}
 .urb-day-col{flex:0 0 92px;position:relative;border-right:1px solid var(--line);cursor:copy;background-color:transparent;}
 @media (min-width:760px){ .urb-day-col{flex:1 1 0;} }
 .urb-day-col:last-child{border-right:none;}
