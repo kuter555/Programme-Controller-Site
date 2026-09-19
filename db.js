@@ -25,7 +25,10 @@ db.exec(`
     date TEXT NOT NULL,
     start_min INTEGER NOT NULL,
     end_min INTEGER NOT NULL,
-    repeat_until TEXT
+    repeat_until TEXT,
+    is_podcast INTEGER NOT NULL DEFAULT 0,
+    pending_cancel INTEGER NOT NULL DEFAULT 0,
+    icon TEXT
   );
   CREATE TABLE IF NOT EXISTS members (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -39,6 +42,12 @@ db.exec(`
     hash TEXT NOT NULL
   );
 `);
+
+// Migrate older databases created before these columns existed.
+const existingCols = db.prepare("PRAGMA table_info(bookings)").all().map(c => c.name);
+if (!existingCols.includes('is_podcast')) db.exec("ALTER TABLE bookings ADD COLUMN is_podcast INTEGER NOT NULL DEFAULT 0");
+if (!existingCols.includes('pending_cancel')) db.exec("ALTER TABLE bookings ADD COLUMN pending_cancel INTEGER NOT NULL DEFAULT 0");
+if (!existingCols.includes('icon')) db.exec("ALTER TABLE bookings ADD COLUMN icon TEXT");
 
 /* ---------- password hashing (scrypt, no extra dependency) ---------- */
 function hashPassphrase(passphrase) {
@@ -73,7 +82,8 @@ function rowToBooking(r) {
     id: r.id, studio: r.studio, title: r.title, name: r.name, email: r.email,
     description: r.description || '', admin: !!r.is_admin, repeat: r.repeat,
     pendingRepeat: !!r.pending_repeat, color: r.color || null, date: r.date,
-    startMin: r.start_min, endMin: r.end_min, repeatUntil: r.repeat_until || null
+    startMin: r.start_min, endMin: r.end_min, repeatUntil: r.repeat_until || null,
+    isPodcast: !!r.is_podcast, pendingCancel: !!r.pending_cancel, icon: r.icon || null
   };
 }
 function rowToMember(r) { return { id: r.id, name: r.name, email: r.email, createdAt: r.created_at }; }
@@ -88,22 +98,25 @@ function getBooking(id) {
 }
 function upsertBooking(b) {
   db.prepare(`
-    INSERT INTO bookings (id, studio, title, name, email, description, is_admin, repeat, pending_repeat, color, date, start_min, end_min, repeat_until)
-    VALUES (@id, @studio, @title, @name, @email, @description, @isAdmin, @repeat, @pendingRepeat, @color, @date, @startMin, @endMin, @repeatUntil)
+    INSERT INTO bookings (id, studio, title, name, email, description, is_admin, repeat, pending_repeat, color, date, start_min, end_min, repeat_until, is_podcast, pending_cancel, icon)
+    VALUES (@id, @studio, @title, @name, @email, @description, @isAdmin, @repeat, @pendingRepeat, @color, @date, @startMin, @endMin, @repeatUntil, @isPodcast, @pendingCancel, @icon)
     ON CONFLICT(id) DO UPDATE SET
       studio=excluded.studio, title=excluded.title, name=excluded.name, email=excluded.email,
       description=excluded.description, is_admin=excluded.is_admin, repeat=excluded.repeat,
       pending_repeat=excluded.pending_repeat, color=excluded.color, date=excluded.date,
-      start_min=excluded.start_min, end_min=excluded.end_min, repeat_until=excluded.repeat_until
+      start_min=excluded.start_min, end_min=excluded.end_min, repeat_until=excluded.repeat_until,
+      is_podcast=excluded.is_podcast, pending_cancel=excluded.pending_cancel, icon=excluded.icon
   `).run({
     id: b.id, studio: b.studio, title: b.title, name: b.name, email: b.email,
     description: b.description || '', isAdmin: b.admin ? 1 : 0, repeat: b.repeat || 'none',
     pendingRepeat: b.pendingRepeat ? 1 : 0, color: b.color || null, date: b.date,
-    startMin: b.startMin, endMin: b.endMin, repeatUntil: b.repeatUntil || null
+    startMin: b.startMin, endMin: b.endMin, repeatUntil: b.repeatUntil || null,
+    isPodcast: b.isPodcast ? 1 : 0, pendingCancel: b.pendingCancel ? 1 : 0, icon: b.icon || null
   });
   return getBooking(b.id);
 }
 function deleteBooking(id) { db.prepare('DELETE FROM bookings WHERE id = ?').run(id); }
+function setPendingCancel(id, value) { db.prepare('UPDATE bookings SET pending_cancel = ? WHERE id = ?').run(value ? 1 : 0, id); }
 
 /* ---------- members ---------- */
 function listMembers() { return db.prepare('SELECT * FROM members ORDER BY name COLLATE NOCASE').all().map(rowToMember); }
@@ -119,6 +132,6 @@ function deleteMember(id) { db.prepare('DELETE FROM members WHERE id = ?').run(i
 
 module.exports = {
   ensureAdminPassphrase, checkAdminPassphrase,
-  listBookings, getBooking, upsertBooking, deleteBooking,
+  listBookings, getBooking, upsertBooking, deleteBooking, setPendingCancel,
   listMembers, findMemberByEmail, insertMember, deleteMember
 };

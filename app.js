@@ -9,7 +9,7 @@
   var IDLE_MS = 300000;
   var POLL_MS = 20000;    // how often to refresh bookings/members from the server
   var DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
-  var COLORS = ['#0b2f5e', '#2f6fb0', '#3fa7c9', '#5fb894', '#8a7fd1', '#c76fae', '#e0955c', '#7089a8'];
+  var COLORS = ['#0b2f5e', '#2f6fb0', '#3fa7c9', '#5fb894', '#e0955c'];
   var BATH_EMAIL_RE = /^[a-z0-9._%+-]+@bath\.ac\.uk$/i;
   var GENERIC_EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -152,10 +152,9 @@
       }, this);
       return res;
     }
-    canEditBooking(b) { return !b.admin || this.state.admin; }
     overlaps(form) {
       var d = this.parse(form.date), ds = form.date, wd = (d.getDay() + 6) % 7;
-      var list = this.state.bookings.filter(function (b) { return b.studio === this.state.studio && b.id !== form.id; });
+      var list = this.state.bookings.filter(function (b) { return b.studio === this.state.studio && b.id !== form.id; }, this);
       var same = [];
       list.forEach(function (b) {
         if (b.repeat === 'weekly') {
@@ -170,27 +169,35 @@
     gridClick(e, d) {
       var rect = e.currentTarget.getBoundingClientRect();
       var y = e.clientY - rect.top;
-      var min = Math.round(((y / PX * 60) + this.firstHour() * 60) / SNAP) * SNAP;
-      min = Math.max(0, Math.min(1440 - 30, min));
-      var end = Math.min(1440, min + 30);
+      var hourFromTop = (y / PX) + this.firstHour();
+      var startMin, endMin;
+      if (this.state.studio === 1) {
+        var hr = Math.max(0, Math.min(22, Math.round(hourFromTop)));
+        startMin = hr * 60 + 10;
+        endMin = Math.min(1440, startMin + 60);
+      } else {
+        var min = Math.round((hourFromTop * 60) / SNAP) * SNAP;
+        min = Math.max(0, Math.min(1440 - 30, min));
+        startMin = min; endMin = Math.min(1440, min + 30);
+      }
       this.setState({
         modal: 'booking', formError: '', registering: false,
-        form: { id: null, studio: this.state.studio, title: '', memberId: null, name: '', email: '', description: '', admin: this.state.admin, repeat: 'none', repeatRequest: false, color: null, date: this.fmt(d), startMin: min, endMin: end, repeatUntil: null }
+        form: { id: null, studio: this.state.studio, title: '', memberId: null, name: '', email: '', description: '', admin: this.state.admin, repeat: 'none', repeatRequest: false, isPodcast: false, icon: null, color: null, date: this.fmt(d), startMin: startMin, endMin: endMin, repeatUntil: null }
       });
     }
     openEdit(o) {
-      if (!this.canEditBooking(o.booking)) {
-        this.setState({ modal: 'login', loginError: 'Admin sign-in required to edit this booking.', loginPass: '' });
+      var b = o.booking;
+      if (!this.state.admin) {
+        this.setState({ modal: 'view', viewBooking: b });
         return;
       }
-      var b = o.booking;
       this.setState({
         modal: 'booking', formError: '', registering: false,
-        form: { id: b.id, studio: b.studio, title: b.title, memberId: null, name: b.name, email: b.email, description: b.description || '', admin: b.admin, repeat: b.repeat, repeatRequest: !!b.pendingRepeat, color: b.color || null, date: b.date, startMin: b.startMin, endMin: b.endMin, repeatUntil: b.repeatUntil }
+        form: { id: b.id, studio: b.studio, title: b.title, memberId: null, name: b.name, email: b.email, description: b.description || '', admin: b.admin, repeat: b.repeat, repeatRequest: !!b.pendingRepeat, isPodcast: !!b.isPodcast, icon: b.icon || null, color: b.color || null, date: b.date, startMin: b.startMin, endMin: b.endMin, repeatUntil: b.repeatUntil }
       });
     }
     setField(k, v) { this.setState(function (s) { var f = Object.assign({}, s.form); f[k] = v; return { form: f }; }); }
-    closeModal() { this.setState({ modal: null, form: null, formError: '', registering: false, saving: false }); }
+    closeModal() { this.setState({ modal: null, form: null, formError: '', registering: false, saving: false, viewBooking: null }); }
 
     selectMember(idStr) {
       var m = this.state.members.filter(function (x) { return String(x.id) === String(idStr); })[0];
@@ -198,6 +205,23 @@
       this.setState(function (s) { return { form: Object.assign({}, s.form, { memberId: m.id, name: m.name, email: m.email }) }; });
     }
     clearWho() { this.setState(function (s) { return { form: Object.assign({}, s.form, { memberId: null, name: '', email: '' }) }; }); }
+    uploadIcon(file) {
+      if (!file) return;
+      this.setState({ iconUploading: true });
+      var fd = new FormData();
+      fd.append('icon', file);
+      fetch('/api/icon', { method: 'POST', credentials: 'same-origin', body: fd }).then(function (res) {
+        return res.json().catch(function () { return {}; }).then(function (data) {
+          if (!res.ok) throw new Error(data.error || 'Could not upload image.');
+          return data;
+        });
+      }).then(function (data) {
+        this.setState({ iconUploading: false });
+        this.setField('icon', data.path);
+      }.bind(this)).catch(function (e) {
+        this.setState({ iconUploading: false, formError: e.message || 'Could not upload image.' });
+      }.bind(this));
+    }
     startRegister() { this.setState({ registering: true, regName: '', regEmail: '', regError: '' }); }
     cancelRegister() { this.setState({ registering: false }); }
     submitRegister() {
@@ -223,12 +247,17 @@
       if (!f.name || !f.email || !GENERIC_EMAIL_RE.test(f.email)) return this.setState({ formError: 'Please select who this booking is for.' });
       if (f.endMin <= f.startMin) return this.setState({ formError: 'End time must be after start time.' });
       var dur = f.endMin - f.startMin;
-      if (dur < 30) return this.setState({ formError: 'Minimum booking length is 30 minutes.' });
-      if (!f.admin && dur > 120) return this.setState({ formError: 'Members can book a maximum of 2 hours. Sign in as admin for longer bookings.' });
+      if (f.studio === 1) {
+        if (f.startMin % 60 !== 10) return this.setState({ formError: 'Radio shows start 10 minutes past the hour.' });
+        if (dur !== 60 && dur !== 120) return this.setState({ formError: 'Radio shows run for 1 or 2 hours.' });
+      } else {
+        if (dur < 30) return this.setState({ formError: 'Minimum booking length is 30 minutes.' });
+        if (!f.admin && dur > 120) return this.setState({ formError: 'Members can book a maximum of 2 hours.' });
+      }
       if (f.repeat === 'weekly' && !this.state.admin) return this.setState({ formError: 'Only admins can create repeating bookings.' });
       if (this.overlaps(f)) return this.setState({ formError: 'That time overlaps an existing booking in this studio.' });
       var memberRequest = !this.state.admin && !!f.repeatRequest;
-      var rec = { id: f.id || ('b' + Date.now() + Math.floor(Math.random() * 999)), studio: f.studio, title: f.title.trim(), name: f.name.trim(), email: f.email.trim(), description: f.description.trim(), admin: !!f.admin && this.state.admin, repeat: f.repeat, pendingRepeat: memberRequest, color: f.color || null, date: f.date, startMin: f.startMin, endMin: f.endMin, repeatUntil: f.repeatUntil || null };
+      var rec = { id: f.id || ('b' + Date.now() + Math.floor(Math.random() * 999)), studio: f.studio, title: f.title.trim(), name: f.name.trim(), email: f.email.trim(), description: f.description.trim(), admin: !!f.admin && this.state.admin, repeat: f.repeat, pendingRepeat: memberRequest, isPodcast: !!f.isPodcast, icon: f.icon || null, color: f.color || null, date: f.date, startMin: f.startMin, endMin: f.endMin, repeatUntil: f.repeatUntil || null };
       this.setState({ saving: true, formError: '' });
       var req = this.state.admin ? api('POST', '/api/admin/bookings', rec) : api('POST', '/api/bookings', rec);
       req.then(function (saved) {
@@ -245,13 +274,22 @@
       var f = this.state.form; if (!f.id) return this.closeModal();
       var id = f.id;
       this.setState({ saving: true });
-      var req = this.state.admin ? api('DELETE', '/api/admin/bookings/' + encodeURIComponent(id)) : api('DELETE', '/api/bookings/' + encodeURIComponent(id));
-      req.then(function () {
+      api('DELETE', '/api/admin/bookings/' + encodeURIComponent(id)).then(function () {
         this.setState({ saving: false });
         this.persist(this.state.bookings.filter(function (b) { return b.id !== id; }));
         this.closeModal();
       }.bind(this)).catch(function (e) {
         this.setState({ saving: false, formError: 'Could not delete: ' + (e.message || 'try again.') });
+      }.bind(this));
+    }
+    requestCancel(id) {
+      this.setState({ saving: true });
+      api('POST', '/api/bookings/' + encodeURIComponent(id) + '/request-cancel').then(function (saved) {
+        this.setState(function (s) {
+          return { saving: false, viewBooking: saved, bookings: s.bookings.map(function (b) { return b.id === id ? saved : b; }) };
+        });
+      }.bind(this)).catch(function (e) {
+        this.setState({ saving: false, formError: e.message || 'Could not send request.' });
       }.bind(this));
     }
 
@@ -271,6 +309,16 @@
       var b = this.state.bookings.find(function (x) { return x.id === id; }); if (!b) return;
       var rec = Object.assign({}, b, { pendingRepeat: false });
       api('POST', '/api/admin/bookings', rec).then(function (saved) {
+        this.persist(this.state.bookings.map(function (x) { return x.id === id ? saved : x; }));
+      }.bind(this)).catch(function (e) { this.flashAdminError('Could not update: ' + e.message); }.bind(this));
+    }
+    approveCancel(id) {
+      api('POST', '/api/admin/bookings/' + encodeURIComponent(id) + '/approve-cancel').then(function () {
+        this.persist(this.state.bookings.filter(function (x) { return x.id !== id; }));
+      }.bind(this)).catch(function (e) { this.flashAdminError('Could not approve: ' + e.message); }.bind(this));
+    }
+    denyCancel(id) {
+      api('POST', '/api/admin/bookings/' + encodeURIComponent(id) + '/deny-cancel').then(function (saved) {
         this.persist(this.state.bookings.map(function (x) { return x.id === id ? saved : x; }));
       }.bind(this)).catch(function (e) { this.flashAdminError('Could not update: ' + e.message); }.bind(this));
     }
@@ -316,6 +364,7 @@
       return ((r * 299 + g * 587 + bl * 114) / 1000) >= 150 ? '#0b2f5e' : '#ffffff';
     }
     pendingRequests() { return this.state.bookings.filter(function (b) { return b.pendingRepeat; }); }
+    pendingCancellations() { return this.state.bookings.filter(function (b) { return b.pendingCancel; }); }
 
     /* ---------- easter egg (unchanged behaviour, ported to refs/classes) ---------- */
     openEgg() { this.setState({ egg: true }); }
@@ -476,15 +525,17 @@
       var locked = b.admin && !this.state.admin;
       var compact = height < 44;
       var custom = !!b.color;
-      var cls = 'urb-block ' + (custom ? '' : (b.admin ? 'urb-block-admin' : 'urb-block-member'));
+      var cls = 'urb-block ' + (custom ? '' : (b.admin ? 'urb-block-admin' : 'urb-block-member')) + (b.isPodcast ? ' urb-block-podcast' : '');
       var style = { top: (top + 1) + 'px', height: (height - 2) + 'px', padding: compact ? '2px 7px' : '5px 8px' };
       if (custom) { style.background = b.color; style.color = this.contrastColor(b.color); style.borderColor = 'rgba(0,0,0,.15)'; }
       var meta = [];
-      if (b.repeat === 'weekly') meta.push(h('span', { key: 'r', title: 'Repeats weekly' }, '↻'));
-      if (b.pendingRepeat) meta.push(h('span', { key: 'p', title: 'Awaiting admin approval' }, '⏳'));
-      if (locked) meta.push(h('span', { key: 'l', title: 'Locked (admin only)' }, '🔒'));
+      if (b.repeat === 'weekly') meta.push(h('span', { key: 'r', title: 'Weekly slot' }, '↻'));
+      if (b.pendingRepeat) meta.push(h('span', { key: 'p', title: 'Awaiting approval' }, '⏳'));
+      if (b.pendingCancel) meta.push(h('span', { key: 'x', title: 'Cancellation requested' }, '🚫'));
+      if (locked) meta.push(h('span', { key: 'l', title: 'Admin booking' }, '🔒'));
       var children = [
         h('div', { key: 'h', className: 'urb-block-head' },
+          b.icon ? h('img', { className: 'urb-block-icon', src: b.icon, alt: '' }) : null,
           h('span', { className: 'urb-block-title' }, b.title),
           meta.length ? h('span', { className: 'urb-block-meta' }, meta) : null
         )
@@ -515,14 +566,15 @@
 
       var gutter = h('div', { className: 'urb-gutter' },
         hours.map(function (hr) { return h('div', { key: hr, className: 'urb-hour-row', style: { height: PX + 'px' } },
-          hr === H0 ? null : h('span', { className: 'urb-hour-label' }, this.hh(hr) + ':00')
+          hr === H0 ? null : h('span', { className: 'urb-hour-label' }, this.hh(hr) + ':00'),
+          h('span', { className: 'urb-hour-label urb-hour-label-ten', style: { top: ((10 / 60) * PX - 7) + 'px' } }, this.hh(hr) + ':10')
         ); }, this)
       );
-      var quarterLines = hours.map(function (hr) { return h('div', { key: 'q' + hr, className: 'urb-quarter-line', style: { top: ((hr - H0 + 0.25) * PX) + 'px' } }); });
+      var tenPastLines = hours.map(function (hr) { return h('div', { key: 'ten' + hr, className: 'urb-tenpast-line', style: { top: ((hr - H0 + 10 / 60) * PX) + 'px' } }); });
       var colEls = dates.map(function (d, i) {
         var isToday = this.fmt(d) === todayStr;
         return h('div', { key: i, className: 'urb-day-col' + (isToday ? ' today' : ''), style: { height: ((24 - H0) * PX) + 'px' }, onClick: function (e) { this.gridClick(e, d); }.bind(this) },
-          quarterLines,
+          tenPastLines,
           occ[i].map(function (o) { return this.renderBlock(o); }, this)
         );
       }, this);
@@ -547,13 +599,13 @@
     }
     renderModal() {
       if (!this.state.modal) return null;
+      if (this.state.modal === 'view') return this.renderViewModal();
 
       if (this.state.modal === 'login') {
         return h('div', { className: 'urb-overlay urb-fade', onClick: this.closeModal.bind(this) },
           h('div', { className: 'urb-card urb-pop', onClick: function (e) { e.stopPropagation(); } },
             h('div', { className: 'urb-card-head' }, h('span', null, '🔐'), h('div', { className: 'urb-card-head-title' }, 'Admin sign-in')),
             h('div', { className: 'urb-card-body' },
-              h('p', { style: { margin: '0 0 14px', fontSize: '13px', color: 'var(--dim)', fontWeight: 500 } }, 'Admin mode unlocks repeating bookings, locked slots and unlimited length. For the Programme Controller / Station Manager only.'),
               h('div', { className: 'urb-field' }, this.labelEl('Passphrase'),
                 this.input({ type: 'password', value: this.state.loginPass, autoFocus: true, onChange: function (e) { this.setState({ loginPass: e.target.value }); }.bind(this), onKeyDown: function (e) { if (e.key === 'Enter') this.attemptLogin(); }.bind(this) })),
               this.state.loginError ? h('div', { className: 'urb-error' }, this.state.loginError) : null,
@@ -567,13 +619,9 @@
       }
 
       var f = this.state.form;
-      var dur = f.endMin - f.startMin;
-      var durTxt = dur > 0 ? ((Math.floor(dur / 60) ? Math.floor(dur / 60) + 'h ' : '') + (dur % 60 ? (dur % 60) + 'm' : '')) : '';
       var dObj = this.parse(f.date);
       var dayLabel = DAYS[(dObj.getDay() + 6) % 7] + ' ' + dObj.getDate() + '/' + (dObj.getMonth() + 1) + '/' + dObj.getFullYear();
-      var startOpts = this.timeOptions(0, 1440 - SNAP);
-      var endOpts = this.timeOptions(SNAP, 1440);
-      var canEditThis = !f.id || this.canEditBooking(f);
+      var isWeekly = this.state.admin ? f.repeat === 'weekly' : !!f.repeatRequest;
 
       return h('div', { className: 'urb-overlay urb-fade', onClick: this.closeModal.bind(this) },
         h('div', { className: 'urb-card urb-pop', onClick: function (e) { e.stopPropagation(); } },
@@ -587,37 +635,109 @@
             h('div', { style: { fontSize: '13px', fontWeight: 700, color: 'var(--accent)', marginBottom: '12px' } }, '📅 ' + dayLabel),
             h('div', { className: 'urb-field' }, this.labelEl('Title *'), this.input({ value: f.title, placeholder: 'e.g. Afternoon Session', autoFocus: !f.id, onChange: function (e) { this.setField('title', e.target.value); }.bind(this) })),
             h('div', { className: 'urb-field' }, this.labelEl('Booked by *'), this.renderWho()),
-            h('div', { style: { display: 'grid', gridTemplateColumns: '1fr auto 1fr', gap: '10px', alignItems: 'end', marginBottom: '6px' } },
-              h('div', null, this.labelEl('Start'), h('select', { className: 'urb-select', value: f.startMin, onChange: function (e) { var v = +e.target.value; var ne = Math.min(1440, Math.max(v + SNAP, f.endMin)); this.setState(function (s) { return { form: Object.assign({}, s.form, { startMin: v, endMin: ne }) }; }); }.bind(this) }, startOpts.map(function (m) { return h('option', { key: m, value: m }, this.minLabel(m)); }, this))),
-              h('div', { style: { paddingBottom: '10px', color: 'var(--faint)', fontWeight: 700 } }, '→'),
-              h('div', null, this.labelEl('End'), h('select', { className: 'urb-select', value: f.endMin, onChange: function (e) { this.setField('endMin', +e.target.value); }.bind(this) }, endOpts.filter(function (m) { return m > f.startMin; }).map(function (m) { return h('option', { key: m, value: m }, this.minLabel(m)); }, this)))
-            ),
-            h('div', { style: { fontSize: '12px', fontWeight: 600, color: dur > 0 ? 'var(--accent)' : 'var(--danger)', marginBottom: '12px' } }, dur > 0 ? ('Duration: ' + durTxt) : 'End must be after start'),
+            this.renderIconField(f),
+            this.renderTimeFields(f),
             h('div', { className: 'urb-field' }, this.labelEl('Description'), h('textarea', { className: 'urb-textarea', value: f.description, rows: 2, placeholder: 'Optional notes', onChange: function (e) { this.setField('description', e.target.value); }.bind(this) })),
             h('div', { className: 'urb-field' }, this.labelEl('Colour'),
               h('div', { className: 'urb-colors' },
-                COLORS.map(function (c) { return h('button', { key: c, className: 'urb-color-dot' + (f.color === c ? ' selected' : ''), style: { background: c }, onClick: function () { this.setField('color', f.color === c ? null : c); }.bind(this) }); }, this),
-                h('span', { style: { fontSize: '11px', color: 'var(--faint)', fontWeight: 600, marginLeft: '4px' } }, f.color ? 'Custom' : 'Default')
+                COLORS.map(function (c) { return h('button', { key: c, className: 'urb-color-dot' + (f.color === c ? ' selected' : ''), style: { background: c }, onClick: function () { this.setField('color', f.color === c ? null : c); }.bind(this) }); }, this)
               )
             ),
-            this.state.admin ? h('label', { className: 'urb-chip' },
-              h('input', { type: 'checkbox', checked: f.repeat === 'weekly', onChange: function (e) { this.setField('repeat', e.target.checked ? 'weekly' : 'none'); }.bind(this) }),
-              h('div', null, h('div', { style: { fontWeight: 700, fontSize: '13px' } }, 'Repeat weekly ↻'), h('div', { style: { fontSize: '11px', color: 'var(--dim)' } }, 'Recurs every ' + DAYS[(dObj.getDay() + 6) % 7] + ' at this time'))
-            ) : h('label', { className: 'urb-chip' },
-              h('input', { type: 'checkbox', checked: !!f.repeatRequest, onChange: function (e) { this.setField('repeatRequest', e.target.checked); }.bind(this) }),
-              h('div', null, h('div', { style: { fontWeight: 700, fontSize: '13px' } }, 'Request recurring booking ⏳'), h('div', { style: { fontSize: '11px', color: 'var(--dim)' } }, 'Sends a weekly request to the admin for approval — this slot books as one-off until then'))
+            h('div', { className: 'urb-field' }, this.labelEl('Booking type'),
+              h('div', { className: 'urb-radio-row' },
+                h('label', { className: 'urb-radio' },
+                  h('input', { type: 'radio', name: 'btype', checked: !isWeekly, onChange: function () { this.setBookingType(false); }.bind(this) }), 'One-off booking'),
+                h('label', { className: 'urb-radio' },
+                  h('input', { type: 'radio', name: 'btype', checked: isWeekly, onChange: function () { this.setBookingType(true); }.bind(this) }), 'Weekly Slot')
+              )
             ),
-            this.state.admin ? h('div', { className: 'urb-field' }, this.labelEl('Marked as admin / locked'),
-              h('label', { style: { display: 'flex', alignItems: 'center', gap: '9px', fontSize: '13px', fontWeight: 600 } },
-                h('input', { type: 'checkbox', checked: !!f.admin, onChange: function (e) { this.setField('admin', e.target.checked); }.bind(this) }),
-                'Only admins can edit or delete this booking')
+            h('label', { className: 'urb-chip' },
+              h('input', { type: 'checkbox', checked: !!f.isPodcast, onChange: function (e) { this.setField('isPodcast', e.target.checked); }.bind(this) }),
+              'Podcast recording'
+            ),
+            this.state.admin ? h('label', { className: 'urb-chip' },
+              h('input', { type: 'checkbox', checked: !!f.admin, onChange: function (e) { this.setField('admin', e.target.checked); }.bind(this) }),
+              'Admin-locked'
             ) : null,
             this.state.formError ? h('div', { className: 'urb-error-box' }, this.state.formError) : null,
             h('div', { className: 'urb-actions' },
               f.id ? h('button', { className: this.btnClass('danger'), disabled: this.state.saving, onClick: this.deleteBooking.bind(this) }, 'Delete') : null,
               h('div', { style: { flex: 1 } }),
               h('button', { className: this.btnClass('ghost'), onClick: this.closeModal.bind(this) }, 'Cancel'),
-              canEditThis ? h('button', { className: this.btnClass('primary'), disabled: this.state.saving, onClick: this.saveBooking.bind(this) }, this.state.saving ? 'Saving…' : (f.id ? 'Save changes' : 'Create booking')) : null
+              h('button', { className: this.btnClass('primary'), disabled: this.state.saving, onClick: this.saveBooking.bind(this) }, this.state.saving ? 'Saving…' : (f.id ? 'Save changes' : 'Create booking'))
+            )
+          )
+        )
+      );
+    }
+    setBookingType(weekly) {
+      if (this.state.admin) this.setField('repeat', weekly ? 'weekly' : 'none');
+      else this.setField('repeatRequest', weekly);
+    }
+    renderIconField(f) {
+      return h('div', { className: 'urb-field' }, this.labelEl('Show icon'),
+        h('div', { style: { display: 'flex', alignItems: 'center', gap: '10px' } },
+          f.icon ? h('img', { src: f.icon, className: 'urb-icon-preview' }) : h('div', { className: 'urb-icon-preview urb-icon-preview-empty' }),
+          h('input', { type: 'file', accept: 'image/png,image/jpeg,image/webp', onChange: function (e) { this.uploadIcon(e.target.files[0]); }.bind(this) }),
+          this.state.iconUploading ? h('span', { className: 'urb-row-sub' }, 'Uploading…') : null
+        )
+      );
+    }
+    renderTimeFields(f) {
+      if (f.studio === 1) {
+        var startHour = Math.floor((f.startMin - 10) / 60);
+        var durHours = (f.endMin - f.startMin) / 60;
+        var hourOpts = []; for (var hh = 0; hh < 23; hh++) hourOpts.push(hh);
+        var durOpts = [1, 2].filter(function (d) { return startHour * 60 + 10 + d * 60 <= 1440; });
+        return h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', marginBottom: '12px' } },
+          h('div', null, this.labelEl('Start'), h('select', {
+            className: 'urb-select', value: startHour, onChange: function (e) {
+              var hr = +e.target.value; var ns = hr * 60 + 10;
+              var fits = [1, 2].filter(function (d) { return ns + d * 60 <= 1440; });
+              var d = fits.indexOf(durHours) >= 0 ? durHours : fits[fits.length - 1];
+              this.setState(function (s) { return { form: Object.assign({}, s.form, { startMin: ns, endMin: ns + d * 60 }) }; });
+            }.bind(this)
+          }, hourOpts.map(function (hr) { return h('option', { key: hr, value: hr }, this.hh(hr) + ':10'); }, this))),
+          h('div', null, this.labelEl('Duration'), h('select', {
+            className: 'urb-select', value: durHours, onChange: function (e) { this.setField('endMin', f.startMin + (+e.target.value) * 60); }.bind(this)
+          }, durOpts.map(function (d) { return h('option', { key: d, value: d }, d + ' hour' + (d > 1 ? 's' : '')); })))
+        );
+      }
+      var startOpts = this.timeOptions(0, 1440 - SNAP);
+      var endOpts = this.timeOptions(SNAP, 1440);
+      return h('div', { style: { display: 'grid', gridTemplateColumns: '1fr auto 1fr', gap: '10px', alignItems: 'end', marginBottom: '12px' } },
+        h('div', null, this.labelEl('Start'), h('select', { className: 'urb-select', value: f.startMin, onChange: function (e) { var v = +e.target.value; var ne = Math.min(1440, Math.max(v + SNAP, f.endMin)); this.setState(function (s) { return { form: Object.assign({}, s.form, { startMin: v, endMin: ne }) }; }); }.bind(this) }, startOpts.map(function (m) { return h('option', { key: m, value: m }, this.minLabel(m)); }, this))),
+        h('div', { style: { paddingBottom: '10px', color: 'var(--faint)', fontWeight: 700 } }, '→'),
+        h('div', null, this.labelEl('End'), h('select', { className: 'urb-select', value: f.endMin, onChange: function (e) { this.setField('endMin', +e.target.value); }.bind(this) }, endOpts.filter(function (m) { return m > f.startMin; }).map(function (m) { return h('option', { key: m, value: m }, this.minLabel(m)); }, this)))
+      );
+    }
+
+    renderViewModal() {
+      var b = this.state.viewBooking;
+      if (!b) return null;
+      var dObj = this.parse(b.date);
+      var dayLabel = DAYS[(dObj.getDay() + 6) % 7] + ' ' + dObj.getDate() + '/' + (dObj.getMonth() + 1);
+      return h('div', { className: 'urb-overlay urb-fade', onClick: this.closeModal.bind(this) },
+        h('div', { className: 'urb-card urb-pop', onClick: function (e) { e.stopPropagation(); } },
+          h('div', { className: 'urb-card-head' },
+            b.icon ? h('img', { src: b.icon, className: 'urb-view-icon' }) : h('span', { style: { fontSize: '20px' } }, b.isPodcast ? '🎙' : '📻'),
+            h('div', { className: 'urb-card-head-title' }, b.title)
+          ),
+          h('div', { className: 'urb-card-body' },
+            h('div', { style: { fontSize: '13px', fontWeight: 700, color: 'var(--accent)', marginBottom: '12px' } }, dayLabel + ' · ' + this.minLabel(b.startMin) + '–' + this.minLabel(b.endMin)),
+            h('div', { className: 'urb-field' }, this.labelEl('Booked by'), h('div', { style: { fontWeight: 700, fontSize: '14px' } }, b.name)),
+            b.description ? h('div', { className: 'urb-field' }, this.labelEl('Description'), h('div', { style: { fontSize: '13px' } }, b.description)) : null,
+            h('div', { style: { display: 'flex', gap: '10px', flexWrap: 'wrap', marginBottom: '14px' } },
+              b.repeat === 'weekly' ? h('span', { className: 'urb-row-sub' }, '↻ Weekly slot') : null,
+              b.isPodcast ? h('span', { className: 'urb-row-sub' }, '🎙 Podcast recording') : null,
+              b.admin ? h('span', { className: 'urb-row-sub' }, '🔒 Admin booking') : null
+            ),
+            this.state.formError ? h('div', { className: 'urb-error-box' }, this.state.formError) : null,
+            h('div', { className: 'urb-actions' },
+              h('button', { className: this.btnClass('ghost', true), onClick: this.closeModal.bind(this) }, 'Close'),
+              b.pendingCancel
+                ? h('button', { className: this.btnClass('ghost', true), disabled: true }, 'Cancellation requested')
+                : h('button', { className: this.btnClass('danger', true), disabled: this.state.saving, onClick: function () { this.requestCancel(b.id); }.bind(this) }, 'Request to cancel')
             )
           )
         )
@@ -627,14 +747,25 @@
     renderAdminPanel() {
       if (!this.state.admin) return null;
       var reqs = this.pendingRequests();
+      var cancels = this.pendingCancellations();
       var reqRow = function (b) {
         return h('div', { key: b.id, className: 'urb-req-row' },
           h('div', { style: { flex: 1, minWidth: 0 } },
             h('div', { className: 'urb-row-title' }, b.title + ' — Studio ' + (b.studio === 1 ? 'One' : 'Two')),
-            h('div', { className: 'urb-row-sub' }, b.name + ' · ' + b.email + ' · weekly on ' + DAYS[(this.parse(b.date).getDay() + 6) % 7] + ' ' + this.minLabel(b.startMin) + '–' + this.minLabel(b.endMin))
+            h('div', { className: 'urb-row-sub' }, b.name + ' · weekly on ' + DAYS[(this.parse(b.date).getDay() + 6) % 7] + ' ' + this.minLabel(b.startMin) + '–' + this.minLabel(b.endMin))
           ),
           h('button', { className: this.btnClass('primary'), onClick: function () { this.approveRequest(b.id); }.bind(this) }, 'Approve'),
           h('button', { className: this.btnClass('danger'), onClick: function () { this.denyRequest(b.id); }.bind(this) }, 'Deny')
+        );
+      }.bind(this);
+      var cancelRow = function (b) {
+        return h('div', { key: b.id, className: 'urb-req-row' },
+          h('div', { style: { flex: 1, minWidth: 0 } },
+            h('div', { className: 'urb-row-title' }, b.title + ' — Studio ' + (b.studio === 1 ? 'One' : 'Two')),
+            h('div', { className: 'urb-row-sub' }, b.name + ' · ' + b.date + ' ' + this.minLabel(b.startMin) + '–' + this.minLabel(b.endMin))
+          ),
+          h('button', { className: this.btnClass('primary'), onClick: function () { this.approveCancel(b.id); }.bind(this) }, 'Cancel it'),
+          h('button', { className: this.btnClass('danger'), onClick: function () { this.denyCancel(b.id); }.bind(this) }, 'Keep it')
         );
       }.bind(this);
       var memberRow = function (m) {
@@ -651,8 +782,12 @@
         h('div', { className: 'urb-admin-title' }, 'Admin'),
         this.state.adminError ? h('div', { className: 'urb-error', style: { marginBottom: '10px' } }, this.state.adminError) : null,
         h('div', { className: 'urb-admin-section' },
-          h('div', { className: 'urb-row-title', style: { marginBottom: '8px' } }, 'Pending recurring requests'),
-          reqs.length ? reqs.map(reqRow) : h('div', { className: 'urb-row-sub' }, 'No pending recurring booking requests.')
+          h('div', { className: 'urb-row-title', style: { marginBottom: '8px' } }, 'Pending weekly requests'),
+          reqs.length ? reqs.map(reqRow) : h('div', { className: 'urb-row-sub' }, 'None.')
+        ),
+        h('div', { className: 'urb-admin-section' },
+          h('div', { className: 'urb-row-title', style: { marginBottom: '8px' } }, 'Pending cancellations'),
+          cancels.length ? cancels.map(cancelRow) : h('div', { className: 'urb-row-sub' }, 'None.')
         ),
         h('div', { className: 'urb-admin-section' },
           h('div', { className: 'urb-row-title', style: { marginBottom: '8px' } }, 'Registered members (' + this.state.members.length + ')'),
@@ -684,7 +819,7 @@
             h('button', { className: 'btn btn-md' + (this.state.admin ? ' btn-primary' : ''), onClick: this.toggleAdmin.bind(this) }, this.state.admin ? '✓ Admin mode — exit' : '🔓 Admin sign-in')
           ),
 
-          h('div', { className: 'db-banner ' + (this.state.dbError ? 'error' : (!this.state.dbReady ? 'pending' : 'ok')) }, this.state.dbError || 'Connecting to shared calendar…'),
+          h('div', { className: 'db-banner ' + (this.state.dbError ? 'error' : (!this.state.dbReady ? 'pending' : 'ok')) }, this.state.dbError || 'Connecting…'),
 
           h('div', { className: 'urb-tabs' },
             h('button', { className: 'urb-tab' + (this.state.studio === 1 ? ' active' : ''), onClick: function () { this.setState({ studio: 1 }); }.bind(this) },
@@ -713,8 +848,7 @@
               h('div', { className: 'urb-studio-name' }, studioName),
               h('div', { className: 'urb-studio-desc' }, studioDesc)
             ),
-            this.renderGrid(),
-            h('div', { className: 'urb-hint' }, 'Click any empty slot to create a booking · members up to 2 hours' + (this.state.admin ? ' · admin: unlimited length & repeating slots enabled' : ''))
+            this.renderGrid()
           ),
 
           h('div', { className: 'urb-footer' }, 'Toby Gilday 2026')
