@@ -7,8 +7,10 @@
 @font-face{font-family:'Futura';src:url("fonts/futura-700.ttf") format('truetype');font-weight:700;font-display:swap;}
 @font-face{font-family:'Futura';src:url("fonts/futura-800.ttf") format('truetype');font-weight:800;font-display:swap;}
 @font-face{font-family:'Futura';src:url("fonts/futura-900.ttf") format('truetype');font-weight:900;font-display:swap;}
+@font-face{font-family:'Revue';src:url("fonts/revue.ttf") format('truetype');font-weight:400;font-display:swap;}
 
 :root{
+  --font-display:'Revue', Impact, 'Arial Narrow Bold', sans-serif;
   --page:#eef5fd; --panel:#ffffff; --panel-alt:#f7fbff; --border:#c9defb; --line:#c3dbf5;
   --text:#01326c; --dim:#4f6e94; --faint:#7089a8; --accent:#0b2f5e; --accent-strong:#0a63c9;
   --chip:#eef6ff; --shadow:0 2px 10px rgba(1,50,108,.08);
@@ -71,15 +73,15 @@ button{-webkit-tap-highlight-color:transparent;}
 .urb-tabs{display:flex;gap:8px;margin-top:16px;}
 .urb-tab{flex:1;text-align:left;padding:10px 14px;border-radius:11px 11px 0 0;cursor:pointer;border:1px solid transparent;background:transparent;color:var(--dim);}
 .urb-tab.active{border-color:var(--border);border-bottom-color:var(--panel);margin-bottom:-1px;background:var(--panel);color:var(--text);}
-.urb-tab-title{font-weight:900;font-size:14px;letter-spacing:.02em;}
+.urb-tab-title{font-family:var(--font-display);letter-spacing:normal;font-weight:900;font-size:14px;letter-spacing:.02em;}
 .urb-tab-sub{display:block;font-weight:600;font-size:10.5px;letter-spacing:.07em;text-transform:uppercase;opacity:.75;margin-top:2px;}
 
 /* shell / toolbar */
 .urb-shell{margin-top:0;background:var(--panel);border:1px solid var(--border);border-radius:14px;box-shadow:var(--shadow);overflow:hidden;}
 .urb-toolbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:10px 12px;border-bottom:1px solid var(--line);background:var(--panel-alt);}
 @media (min-width:760px){ .urb-toolbar{padding:14px 18px;gap:12px;} }
-.urb-weeklabel{font-weight:800;font-size:15px;}
-@media (min-width:760px){ .urb-weeklabel{font-size:17px;} }
+.urb-weeklabel{font-family:var(--font-display);letter-spacing:normal;font-weight:800;font-size:15px;}
+@media (min-width:760px){ .urb-weeklabel{font-family:var(--font-display);letter-spacing:normal;font-size:17px;} }
 .urb-legend{display:none;align-items:center;gap:14px;font-size:12px;font-weight:600;}
 @media (min-width:760px){ .urb-legend{display:flex;} }
 .urb-swatch{width:13px;height:13px;border-radius:4px;display:inline-block;margin-right:5px;vertical-align:-2px;}
@@ -87,7 +89,7 @@ button{-webkit-tap-highlight-color:transparent;}
 .swatch-admin{background:var(--admin-bg);}
 
 .urb-studio-head{padding:12px 14px 6px;display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;}
-.urb-studio-name{font-weight:900;font-size:17px;}
+.urb-studio-name{font-family:var(--font-display);letter-spacing:normal;font-weight:900;font-size:17px;}
 .urb-studio-desc{font-weight:500;font-size:12.5px;color:var(--dim);}
 
 /* grid */
@@ -105,8 +107,8 @@ button{-webkit-tap-highlight-color:transparent;}
 @media (min-width:760px){ .urb-day-head{flex:1 1 0;} }
 .urb-day-head:last-child{border-right:none;}
 .urb-day-head.today{background:var(--today-tint);}
-.urb-day-head-name{font-weight:800;font-size:11px;letter-spacing:.05em;text-transform:uppercase;color:var(--text);}
-.urb-day-head.today .urb-day-head-name{color:var(--accent);}
+.urb-day-head-name{font-family:var(--font-display);letter-spacing:normal;font-weight:800;font-size:11px;letter-spacing:.05em;text-transform:uppercase;color:var(--text);}
+.urb-day-head.today .urb-day-head-name{font-family:var(--font-display);letter-spacing:normal;color:var(--accent);}
 .urb-day-head-date{font-weight:700;font-size:12px;color:var(--dim);margin-top:2px;}
 .urb-day-head.today .urb-day-head-date{color:var(--accent);}
 
@@ -127,7 +129,7 @@ button{-webkit-tap-highlight-color:transparent;}
 .urb-block-podcast{border-width:2px;border-style:dashed;border-color:var(--podcast-border);}
 .urb-block-head{display:flex;align-items:center;gap:4px;justify-content:space-between;}
 .urb-block-icon{width:15px;height:15px;border-radius:3px;object-fit:cover;flex:none;}
-.urb-block-title{font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.urb-block-title{font-family:var(--font-display);letter-spacing:normal;font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .urb-block-meta{display:flex;gap:3px;flex:none;font-size:10px;}
 .urb-block-time{font-weight:600;opacity:.9;margin-top:1px;}
 .urb-block-name{opacity:.75;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
@@ -143,7 +145,7 @@ button{-webkit-tap-highlight-color:transparent;}
 .urb-card{width:100%;max-width:440px;background:var(--panel);border-radius:14px;border:1px solid var(--border);box-shadow:0 8px 28px rgba(1,50,108,.22);overflow:hidden;color:var(--text);}
 :root[data-theme="dark"] .urb-card{box-shadow:0 8px 28px rgba(0,0,0,.5);}
 .urb-card-head{padding:14px 18px;background:var(--admin-bg);color:#fff;display:flex;align-items:center;gap:10px;}
-.urb-card-head-title{font-weight:900;font-size:16px;}
+.urb-card-head-title{font-family:var(--font-display);letter-spacing:normal;font-weight:900;font-size:16px;}
 .urb-card-body{padding:16px 18px;}
 
 .urb-field{margin-bottom:12px;}
@@ -167,7 +169,7 @@ button{-webkit-tap-highlight-color:transparent;}
 /* who-picker */
 .urb-who-box{border:1px solid var(--border);border-radius:9px;padding:10px 11px;background:var(--panel-alt);}
 .urb-who-selected{display:flex;align-items:center;justify-content:space-between;gap:8px;}
-.urb-who-name{font-weight:800;font-size:13.5px;}
+.urb-who-name{font-family:var(--font-display);letter-spacing:normal;font-weight:800;font-size:13.5px;}
 .urb-who-email{font-size:11.5px;color:var(--dim);}
 .urb-link-btn{background:none;border:none;color:var(--accent-strong);font-weight:700;font-size:12px;cursor:pointer;padding:0;}
 .urb-register-toggle{margin-top:8px;}
