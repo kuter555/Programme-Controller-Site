@@ -605,6 +605,8 @@
       var H0 = this.firstHour();
       var hours = []; for (var i = H0; i < 24; i++) hours.push(i);
 
+      var isDj = this.state.studio === 2;
+
       var hdCells = [h('div', { key: 'c', className: 'urb-gutter-cell' })];
       dates.forEach(function (d, i) {
         var isToday = this.fmt(d) === todayStr;
@@ -615,16 +617,30 @@
       }, this);
       var header = h('div', { className: 'urb-grid-head' }, hdCells);
 
+      // Studio One shows start ten minutes past the hour, so its sidebar labels
+      // and the solid guide line both sit at :10. Studio Two runs on a plain
+      // on-the-hour grid, so its labels read :00 and the line sits on the hour
+      // to line up exactly with the sidebar; Studio One also gets a faint
+      // dotted on-the-hour line so the hour boundary itself is still visible
+      // across the grid, not just in the sidebar.
       var gutter = h('div', { className: 'urb-gutter' },
-        hours.map(function (hr) { return h('div', { key: hr, className: 'urb-hour-row', style: { height: PX + 'px' } },
-          h('span', { className: 'urb-hour-label', style: { top: ((10 / 60) * PX - 7) + 'px' } }, this.hh(hr) + ':10')
-        ); }, this)
+        hours.map(function (hr) {
+          return h('div', { key: hr, className: 'urb-hour-row', style: { height: PX + 'px' } },
+            isDj
+              ? h('span', { className: 'urb-hour-label' }, this.hh(hr) + ':00')
+              : h('span', { className: 'urb-hour-label', style: { top: ((10 / 60) * PX - 7) + 'px' } }, this.hh(hr) + ':10')
+          );
+        }, this)
       );
-      var tenPastLines = hours.map(function (hr) { return h('div', { key: 'ten' + hr, className: 'urb-tenpast-line', style: { top: ((hr - H0 + 10 / 60) * PX) + 'px' } }); });
+      var gridLines = isDj
+        ? hours.map(function (hr) { return h('div', { key: 'hr' + hr, className: 'urb-tenpast-line', style: { top: ((hr - H0) * PX) + 'px' } }); })
+        : hours.map(function (hr) { return h('div', { key: 'ten' + hr, className: 'urb-tenpast-line', style: { top: ((hr - H0 + 10 / 60) * PX) + 'px' } }); });
+      var onHourLines = isDj ? null : hours.map(function (hr) { return h('div', { key: 'oh' + hr, className: 'urb-onhour-line', style: { top: ((hr - H0) * PX) + 'px' } }); });
       var colEls = dates.map(function (d, i) {
         var isToday = this.fmt(d) === todayStr;
         return h('div', { key: i, className: 'urb-day-col' + (isToday ? ' today' : ''), style: { height: ((24 - H0) * PX) + 'px' }, onClick: function (e) { this.gridClick(e, d); }.bind(this) },
-          tenPastLines,
+          onHourLines,
+          gridLines,
           occ[i].map(function (o) { return this.renderBlock(o); }, this)
         );
       }, this);

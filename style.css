@@ -93,7 +93,12 @@ button{-webkit-tap-highlight-color:transparent;}
 .urb-studio-desc{font-weight:500;font-size:12.5px;color:var(--dim);}
 
 /* grid */
-.urb-scroll{overflow-x:auto;overflow-y:auto;max-height:64vh;border-top:1px solid var(--line);-webkit-overflow-scrolling:touch;scroll-snap-type:x proximity;scroll-padding-left:44px;}
+/* Safari (particularly iOS) fails to paint an ancestor's background across
+   columns that only enter view after horizontal scroll, when that ancestor
+   sits inside nested overflow:hidden/overflow:auto + position:sticky
+   containers like this grid. Every column below therefore declares its own
+   opaque background instead of relying on one bleeding through from .urb-shell. */
+.urb-scroll{background:var(--panel);overflow-x:auto;overflow-y:auto;max-height:64vh;border-top:1px solid var(--line);-webkit-overflow-scrolling:touch;scroll-snap-type:x proximity;scroll-padding-left:44px;}
 @media (min-width:760px){ .urb-scroll{scroll-snap-type:none;scroll-padding-left:0;} }
 .urb-day-col{scroll-snap-align:start;}
 /* NOTE: this row uses flexbox, not grid — a grid item's containing block is
@@ -106,7 +111,7 @@ button{-webkit-tap-highlight-color:transparent;}
 .urb-grid-head{position:sticky;top:0;z-index:20;display:flex;width:max-content;min-width:100%;background:var(--panel);border-bottom:2px solid var(--border);}
 .urb-gutter-cell{flex:0 0 44px;border-right:1px solid var(--line);position:sticky;top:0;left:0;z-index:21;background:var(--panel);}
 @media (min-width:760px){ .urb-gutter-cell{flex-basis:56px;} }
-.urb-day-head{flex:0 0 92px;padding:7px 2px;text-align:center;border-right:1px solid var(--line);}
+.urb-day-head{flex:0 0 92px;padding:7px 2px;text-align:center;border-right:1px solid var(--line);background:var(--panel);}
 @media (min-width:760px){ .urb-day-head{flex:1 1 0;} }
 .urb-day-head:last-child{border-right:none;}
 .urb-day-head.today{background:var(--today-tint);}
@@ -115,16 +120,17 @@ button{-webkit-tap-highlight-color:transparent;}
 .urb-day-head-date{font-weight:700;font-size:12px;color:var(--dim);margin-top:2px;}
 .urb-day-head.today .urb-day-head-date{color:var(--accent);}
 
-.urb-grid-body{display:flex;width:max-content;min-width:100%;}
+.urb-grid-body{display:flex;width:max-content;min-width:100%;background:var(--panel);}
 .urb-gutter{flex:0 0 44px;border-right:1px solid var(--line);position:sticky;left:0;z-index:10;background:var(--panel-alt);}
 @media (min-width:760px){ .urb-gutter{flex-basis:56px;} }
 .urb-hour-row{position:relative;border-bottom:1px solid var(--line);}
 .urb-hour-label{position:absolute;top:-7px;right:5px;font-size:10.5px;font-weight:700;color:var(--faint);background:var(--panel-alt);padding-left:3px;}
-.urb-day-col{flex:0 0 92px;position:relative;border-right:1px solid var(--line);cursor:copy;background-color:transparent;}
+.urb-day-col{flex:0 0 92px;position:relative;border-right:1px solid var(--line);cursor:copy;background-color:var(--panel);}
 @media (min-width:760px){ .urb-day-col{flex:1 1 0;} }
 .urb-day-col:last-child{border-right:none;}
 .urb-day-col.today{background-color:var(--today-tint);}
 .urb-tenpast-line{position:absolute;left:0;right:0;border-top:1px solid var(--tenpast-line);pointer-events:none;}
+.urb-onhour-line{position:absolute;left:0;right:0;border-top:1px dashed var(--line);pointer-events:none;}
 
 .urb-block{position:absolute;left:3px;right:3px;border-radius:6px;overflow:hidden;cursor:pointer;z-index:1;font-size:11px;line-height:1.2;border:1px solid transparent;}
 .urb-block-member{background:var(--member-bg);color:var(--text);border-color:var(--member-border);}
