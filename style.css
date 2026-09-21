@@ -100,8 +100,11 @@ button{-webkit-tap-highlight-color:transparent;}
    its own grid area, which clamps position:sticky to that cell's width and
    breaks the frozen gutter as soon as you scroll past it. Flex items don't
    get that treatment, so sticky works across the full scroll range. */
-.urb-grid-head{position:sticky;top:0;z-index:5;display:flex;width:max-content;min-width:100%;background:var(--panel);border-bottom:2px solid var(--border);}
-.urb-gutter-cell{flex:0 0 44px;border-right:1px solid var(--line);position:sticky;left:0;z-index:6;background:var(--panel);}
+/* z-index scale for the grid (kept far apart so nothing here can ever
+   accidentally end up above the header or below the time gutter):
+   header row 20 > corner cell 21 > time gutter 10 > booking blocks 1 */
+.urb-grid-head{position:sticky;top:0;z-index:20;display:flex;width:max-content;min-width:100%;background:var(--panel);border-bottom:2px solid var(--border);}
+.urb-gutter-cell{flex:0 0 44px;border-right:1px solid var(--line);position:sticky;top:0;left:0;z-index:21;background:var(--panel);}
 @media (min-width:760px){ .urb-gutter-cell{flex-basis:56px;} }
 .urb-day-head{flex:0 0 92px;padding:7px 2px;text-align:center;border-right:1px solid var(--line);}
 @media (min-width:760px){ .urb-day-head{flex:1 1 0;} }
@@ -113,7 +116,7 @@ button{-webkit-tap-highlight-color:transparent;}
 .urb-day-head.today .urb-day-head-date{color:var(--accent);}
 
 .urb-grid-body{display:flex;width:max-content;min-width:100%;}
-.urb-gutter{flex:0 0 44px;border-right:1px solid var(--line);position:sticky;left:0;z-index:2;background:var(--panel-alt);}
+.urb-gutter{flex:0 0 44px;border-right:1px solid var(--line);position:sticky;left:0;z-index:10;background:var(--panel-alt);}
 @media (min-width:760px){ .urb-gutter{flex-basis:56px;} }
 .urb-hour-row{position:relative;border-bottom:1px solid var(--line);}
 .urb-hour-label{position:absolute;top:-7px;right:5px;font-size:10.5px;font-weight:700;color:var(--faint);background:var(--panel-alt);padding-left:3px;}
@@ -123,12 +126,11 @@ button{-webkit-tap-highlight-color:transparent;}
 .urb-day-col.today{background-color:var(--today-tint);}
 .urb-tenpast-line{position:absolute;left:0;right:0;border-top:1px solid var(--tenpast-line);pointer-events:none;}
 
-.urb-block{position:absolute;left:3px;right:3px;border-radius:6px;overflow:hidden;cursor:pointer;z-index:3;font-size:11px;line-height:1.2;border:1px solid transparent;}
+.urb-block{position:absolute;left:3px;right:3px;border-radius:6px;overflow:hidden;cursor:pointer;z-index:1;font-size:11px;line-height:1.2;border:1px solid transparent;}
 .urb-block-member{background:var(--member-bg);color:var(--text);border-color:var(--member-border);}
 .urb-block-admin{background:var(--admin-bg);color:#fff;border-color:var(--admin-bg);}
 .urb-block-podcast{border-width:2px;border-style:dashed;border-color:var(--podcast-border);}
 .urb-block-head{display:flex;align-items:center;gap:4px;justify-content:space-between;}
-.urb-block-icon{width:15px;height:15px;border-radius:3px;object-fit:cover;flex:none;}
 .urb-block-title{font-family:var(--font-display);letter-spacing:normal;font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .urb-block-meta{display:flex;gap:3px;flex:none;font-size:10px;}
 .urb-block-time{font-weight:600;opacity:.9;margin-top:1px;}
@@ -162,9 +164,6 @@ button{-webkit-tap-highlight-color:transparent;}
 .urb-color-dot.selected{border-color:var(--accent-strong);box-shadow:0 0 0 2px var(--panel),0 0 0 3px var(--accent-strong);}
 .urb-radio-row{display:flex;gap:16px;}
 .urb-radio{display:flex;align-items:center;gap:6px;font-size:13px;font-weight:600;cursor:pointer;}
-.urb-icon-preview{width:44px;height:44px;border-radius:8px;object-fit:cover;flex:none;border:1px solid var(--border);}
-.urb-icon-preview-empty{background:var(--chip);}
-.urb-view-icon{width:32px;height:32px;border-radius:7px;object-fit:cover;flex:none;}
 
 /* who-picker */
 .urb-who-box{border:1px solid var(--border);border-radius:9px;padding:10px 11px;background:var(--panel-alt);}

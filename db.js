@@ -48,6 +48,11 @@ const existingCols = db.prepare("PRAGMA table_info(bookings)").all().map(c => c.
 if (!existingCols.includes('is_podcast')) db.exec("ALTER TABLE bookings ADD COLUMN is_podcast INTEGER NOT NULL DEFAULT 0");
 if (!existingCols.includes('pending_cancel')) db.exec("ALTER TABLE bookings ADD COLUMN pending_cancel INTEGER NOT NULL DEFAULT 0");
 if (!existingCols.includes('icon')) db.exec("ALTER TABLE bookings ADD COLUMN icon TEXT");
+if (!existingCols.includes('pending_approval')) db.exec("ALTER TABLE bookings ADD COLUMN pending_approval INTEGER NOT NULL DEFAULT 0");
+
+const existingMemberCols = db.prepare("PRAGMA table_info(members)").all().map(c => c.name);
+// Existing members were trusted under the old no-approval flow, so grandfather them in as approved.
+if (!existingMemberCols.includes('approved')) db.exec("ALTER TABLE members ADD COLUMN approved INTEGER NOT NULL DEFAULT 1");
 
 /* ---------- password hashing (scrypt, no extra dependency) ---------- */
 function hashPassphrase(passphrase) {
@@ -83,10 +88,11 @@ function rowToBooking(r) {
     description: r.description || '', admin: !!r.is_admin, repeat: r.repeat,
     pendingRepeat: !!r.pending_repeat, color: r.color || null, date: r.date,
     startMin: r.start_min, endMin: r.end_min, repeatUntil: r.repeat_until || null,
-    isPodcast: !!r.is_podcast, pendingCancel: !!r.pending_cancel, icon: r.icon || null
+    isPodcast: !!r.is_podcast, pendingCancel: !!r.pending_cancel,
+    pendingApproval: !!r.pending_approval
   };
 }
-function rowToMember(r) { return { id: r.id, name: r.name, email: r.email, createdAt: r.created_at }; }
+function rowToMember(r) { return { id: r.id, name: r.name, email: r.email, approved: !!r.approved, createdAt: r.created_at }; }
 
 /* ---------- bookings ---------- */
 function listBookings() {
@@ -98,40 +104,58 @@ function getBooking(id) {
 }
 function upsertBooking(b) {
   db.prepare(`
-    INSERT INTO bookings (id, studio, title, name, email, description, is_admin, repeat, pending_repeat, color, date, start_min, end_min, repeat_until, is_podcast, pending_cancel, icon)
-    VALUES (@id, @studio, @title, @name, @email, @description, @isAdmin, @repeat, @pendingRepeat, @color, @date, @startMin, @endMin, @repeatUntil, @isPodcast, @pendingCancel, @icon)
+    INSERT INTO bookings (id, studio, title, name, email, description, is_admin, repeat, pending_repeat, color, date, start_min, end_min, repeat_until, is_podcast, pending_cancel, pending_approval)
+    VALUES (@id, @studio, @title, @name, @email, @description, @isAdmin, @repeat, @pendingRepeat, @color, @date, @startMin, @endMin, @repeatUntil, @isPodcast, @pendingCancel, @pendingApproval)
     ON CONFLICT(id) DO UPDATE SET
       studio=excluded.studio, title=excluded.title, name=excluded.name, email=excluded.email,
       description=excluded.description, is_admin=excluded.is_admin, repeat=excluded.repeat,
       pending_repeat=excluded.pending_repeat, color=excluded.color, date=excluded.date,
       start_min=excluded.start_min, end_min=excluded.end_min, repeat_until=excluded.repeat_until,
-      is_podcast=excluded.is_podcast, pending_cancel=excluded.pending_cancel, icon=excluded.icon
+      is_podcast=excluded.is_podcast, pending_cancel=excluded.pending_cancel, pending_approval=excluded.pending_approval
   `).run({
     id: b.id, studio: b.studio, title: b.title, name: b.name, email: b.email,
     description: b.description || '', isAdmin: b.admin ? 1 : 0, repeat: b.repeat || 'none',
     pendingRepeat: b.pendingRepeat ? 1 : 0, color: b.color || null, date: b.date,
     startMin: b.startMin, endMin: b.endMin, repeatUntil: b.repeatUntil || null,
-    isPodcast: b.isPodcast ? 1 : 0, pendingCancel: b.pendingCancel ? 1 : 0, icon: b.icon || null
+    isPodcast: b.isPodcast ? 1 : 0, pendingCancel: b.pendingCancel ? 1 : 0,
+    pendingApproval: b.pendingApproval ? 1 : 0
   });
   return getBooking(b.id);
 }
 function deleteBooking(id) { db.prepare('DELETE FROM bookings WHERE id = ?').run(id); }
 function setPendingCancel(id, value) { db.prepare('UPDATE bookings SET pending_cancel = ? WHERE id = ?').run(value ? 1 : 0, id); }
 
+// Sum of minutes already booked by this member as one-off (non-weekly) Studio Two
+// slots within [weekStartDate, weekEndDate], excluding a given booking id (for edits)
+// and excluding still-pending override requests (they don't count until approved).
+function djWeeklyMinutes(email, weekStartDate, weekEndDate, excludeId) {
+  const row = db.prepare(`
+    SELECT COALESCE(SUM(end_min - start_min), 0) AS mins FROM bookings
+    WHERE studio = 2 AND repeat != 'weekly' AND pending_approval = 0
+      AND email = ? COLLATE NOCASE AND date >= ? AND date <= ? AND id != ?
+  `).get(email, weekStartDate, weekEndDate, excludeId || '');
+  return row.mins;
+}
+
 /* ---------- members ---------- */
-function listMembers() { return db.prepare('SELECT * FROM members ORDER BY name COLLATE NOCASE').all().map(rowToMember); }
+function listApprovedMembers() { return db.prepare('SELECT * FROM members WHERE approved = 1 ORDER BY name COLLATE NOCASE').all().map(rowToMember); }
+function listPendingMembers() { return db.prepare('SELECT * FROM members WHERE approved = 0 ORDER BY created_at').all().map(rowToMember); }
 function findMemberByEmail(email) {
   const r = db.prepare('SELECT * FROM members WHERE email = ? COLLATE NOCASE').get(email);
   return r ? rowToMember(r) : null;
 }
 function insertMember(name, email) {
-  const info = db.prepare('INSERT INTO members (name, email) VALUES (?, ?)').run(name, email);
+  const info = db.prepare('INSERT INTO members (name, email, approved) VALUES (?, ?, 0)').run(name, email);
   return rowToMember(db.prepare('SELECT * FROM members WHERE id = ?').get(info.lastInsertRowid));
+}
+function approveMember(id) {
+  db.prepare('UPDATE members SET approved = 1 WHERE id = ?').run(id);
+  return rowToMember(db.prepare('SELECT * FROM members WHERE id = ?').get(id));
 }
 function deleteMember(id) { db.prepare('DELETE FROM members WHERE id = ?').run(id); }
 
 module.exports = {
   ensureAdminPassphrase, checkAdminPassphrase,
-  listBookings, getBooking, upsertBooking, deleteBooking, setPendingCancel,
-  listMembers, findMemberByEmail, insertMember, deleteMember
+  listBookings, getBooking, upsertBooking, deleteBooking, setPendingCancel, djWeeklyMinutes,
+  listApprovedMembers, listPendingMembers, findMemberByEmail, insertMember, approveMember, deleteMember
 };

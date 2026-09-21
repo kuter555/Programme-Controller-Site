@@ -33,10 +33,10 @@
       var prefersDark = false;
       try { prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches; } catch (e) {}
       this.state = {
-        studio: 1, weekStart: null, bookings: [], members: [],
+        studio: 1, weekStart: null, bookings: [], members: [], pendingMembers: [],
         admin: false, adminError: '',
-        modal: null, form: null, formError: '', saving: false,
-        registering: false, regName: '', regEmail: '', regError: '', regBusy: false,
+        modal: null, form: null, formError: '', saving: false, canOverride: false,
+        registering: false, regName: '', regEmail: '', regError: '', regBusy: false, regSubmitted: false,
         loginPass: '', loginError: '', loginBusy: false,
         dbReady: false, dbError: '',
         dark: prefersDark, egg: false, idle: false, showEarly: false, loadPhase: 'in'
@@ -46,13 +46,17 @@
     /* ---------- data layer (talks to our own /api/* on the same server) ---------- */
     dbFetchBookings() { return api('GET', '/api/bookings'); }
     dbFetchMembers() { return api('GET', '/api/members'); }
+    dbFetchPendingMembers() { return api('GET', '/api/admin/members/pending').catch(function () { return []; }); }
     dbCheckAdminSession() { return api('GET', '/api/admin/session').then(function (d) { return !!d.admin; }); }
+    refreshPendingMembers() {
+      this.dbFetchPendingMembers().then(function (list) { this.setState({ pendingMembers: list }); }.bind(this));
+    }
     startPolling() {
       clearInterval(this._pollTimer);
       this._pollTimer = setInterval(function () {
         if (document.hidden) return;
-        Promise.all([this.dbFetchBookings(), this.dbFetchMembers()]).then(function (res) {
-          this.setState({ bookings: res[0], members: res[1] });
+        Promise.all([this.dbFetchBookings(), this.dbFetchMembers(), this.dbFetchPendingMembers()]).then(function (res) {
+          this.setState({ bookings: res[0], members: res[1], pendingMembers: res[2] });
         }.bind(this)).catch(function (e) { console.error('poll failed', e); });
       }.bind(this), POLL_MS);
     }
@@ -74,9 +78,9 @@
         if (mq.addEventListener) mq.addEventListener('change', this._mqHandler); else mq.addListener(this._mqHandler);
         this._mq = mq;
       } catch (e) {}
-      Promise.all([this.dbFetchBookings(), this.dbFetchMembers(), this.dbCheckAdminSession()])
+      Promise.all([this.dbFetchBookings(), this.dbFetchMembers(), this.dbCheckAdminSession(), this.dbFetchPendingMembers()])
         .then(function (res) {
-          this.setState({ bookings: res[0], members: res[1], admin: res[2], dbReady: true });
+          this.setState({ bookings: res[0], members: res[1], admin: res[2], pendingMembers: res[3], dbReady: true });
           this.finishLoading();
           this.startPolling();
         }.bind(this)).catch(function (e) {
@@ -135,7 +139,7 @@
     weekOccurrences() {
       var dates = this.weekDates();
       var res = dates.map(function () { return []; });
-      var list = this.state.bookings.filter(function (b) { return b.studio === this.state.studio; }, this);
+      var list = this.state.bookings.filter(function (b) { return b.studio === this.state.studio && !b.pendingApproval; }, this);
       dates.forEach(function (d, i) {
         var ds = this.fmt(d);
         var wd = (d.getDay() + 6) % 7;
@@ -154,7 +158,7 @@
     }
     overlaps(form) {
       var d = this.parse(form.date), ds = form.date, wd = (d.getDay() + 6) % 7;
-      var list = this.state.bookings.filter(function (b) { return b.studio === this.state.studio && b.id !== form.id; }, this);
+      var list = this.state.bookings.filter(function (b) { return b.studio === this.state.studio && b.id !== form.id && !b.pendingApproval; }, this);
       var same = [];
       list.forEach(function (b) {
         if (b.repeat === 'weekly') {
@@ -181,8 +185,8 @@
         startMin = min; endMin = Math.min(1440, min + 30);
       }
       this.setState({
-        modal: 'booking', formError: '', registering: false,
-        form: { id: null, studio: this.state.studio, title: '', memberId: null, name: '', email: '', description: '', admin: this.state.admin, repeat: 'none', repeatRequest: false, isPodcast: false, icon: null, color: null, date: this.fmt(d), startMin: startMin, endMin: endMin, repeatUntil: null }
+        modal: 'booking', formError: '', registering: false, canOverride: false,
+        form: { id: null, studio: this.state.studio, title: '', memberId: null, name: '', email: '', description: '', admin: this.state.admin, repeat: 'none', repeatRequest: false, isPodcast: false, color: null, date: this.fmt(d), startMin: startMin, endMin: endMin, repeatUntil: null }
       });
     }
     openEdit(o) {
@@ -192,12 +196,12 @@
         return;
       }
       this.setState({
-        modal: 'booking', formError: '', registering: false,
-        form: { id: b.id, studio: b.studio, title: b.title, memberId: null, name: b.name, email: b.email, description: b.description || '', admin: b.admin, repeat: b.repeat, repeatRequest: !!b.pendingRepeat, isPodcast: !!b.isPodcast, icon: b.icon || null, color: b.color || null, date: b.date, startMin: b.startMin, endMin: b.endMin, repeatUntil: b.repeatUntil }
+        modal: 'booking', formError: '', registering: false, canOverride: false,
+        form: { id: b.id, studio: b.studio, title: b.title, memberId: null, name: b.name, email: b.email, description: b.description || '', admin: b.admin, repeat: b.repeat, repeatRequest: !!b.pendingRepeat, isPodcast: !!b.isPodcast, color: b.color || null, date: b.date, startMin: b.startMin, endMin: b.endMin, repeatUntil: b.repeatUntil }
       });
     }
     setField(k, v) { this.setState(function (s) { var f = Object.assign({}, s.form); f[k] = v; return { form: f }; }); }
-    closeModal() { this.setState({ modal: null, form: null, formError: '', registering: false, saving: false, viewBooking: null }); }
+    closeModal() { this.setState({ modal: null, form: null, formError: '', registering: false, regSubmitted: false, saving: false, viewBooking: null, canOverride: false }); }
 
     selectMember(idStr) {
       var m = this.state.members.filter(function (x) { return String(x.id) === String(idStr); })[0];
@@ -205,23 +209,6 @@
       this.setState(function (s) { return { form: Object.assign({}, s.form, { memberId: m.id, name: m.name, email: m.email }) }; });
     }
     clearWho() { this.setState(function (s) { return { form: Object.assign({}, s.form, { memberId: null, name: '', email: '' }) }; }); }
-    uploadIcon(file) {
-      if (!file) return;
-      this.setState({ iconUploading: true });
-      var fd = new FormData();
-      fd.append('icon', file);
-      fetch('/api/icon', { method: 'POST', credentials: 'same-origin', body: fd }).then(function (res) {
-        return res.json().catch(function () { return {}; }).then(function (data) {
-          if (!res.ok) throw new Error(data.error || 'Could not upload image.');
-          return data;
-        });
-      }).then(function (data) {
-        this.setState({ iconUploading: false });
-        this.setField('icon', data.path);
-      }.bind(this)).catch(function (e) {
-        this.setState({ iconUploading: false, formError: e.message || 'Could not upload image.' });
-      }.bind(this));
-    }
     startRegister() { this.setState({ registering: true, regName: '', regEmail: '', regError: '' }); }
     cancelRegister() { this.setState({ registering: false }); }
     submitRegister() {
@@ -233,32 +220,61 @@
         return this.setState({ regError: 'That email is already registered — select it from the list instead.' });
       this.setState({ regError: '', regBusy: true });
       api('POST', '/api/members', { name: name, email: email }).then(function (m) {
-        this.setState(function (s) {
-          return { regBusy: false, members: s.members.concat([m]).sort(function (a, b) { return a.name.localeCompare(b.name); }), registering: false, form: Object.assign({}, s.form, { memberId: m.id, name: m.name, email: m.email }) };
-        });
+        this.setState({ regBusy: false, registering: false, regSubmitted: true, regName: '', regEmail: '' });
       }.bind(this)).catch(function (e) {
         this.setState({ regBusy: false, regError: e.message || 'Could not register — try again.' });
       }.bind(this));
     }
 
-    saveBooking() {
+    djWeeklyUsedMin(email, dateStr, excludeId) {
+      var wd = (this.parse(dateStr).getDay() + 6) % 7;
+      var weekStart = this.stripTime(this.addDays(this.parse(dateStr), -wd));
+      var weekEnd = this.addDays(weekStart, 6);
+      var used = 0;
+      this.state.bookings.forEach(function (b) {
+        if (b.studio !== 2 || b.repeat === 'weekly' || b.pendingApproval || b.id === excludeId) return;
+        if (b.email.toLowerCase() !== email.toLowerCase()) return;
+        var d = this.parse(b.date);
+        if (d < weekStart || d > weekEnd) return;
+        used += (b.endMin - b.startMin);
+      }, this);
+      return used;
+    }
+    saveBooking(overrideRequest) {
       var f = this.state.form;
-      if (!f.title.trim()) return this.setState({ formError: 'Please enter a booking title.' });
-      if (!f.name || !f.email || !GENERIC_EMAIL_RE.test(f.email)) return this.setState({ formError: 'Please select who this booking is for.' });
-      if (f.endMin <= f.startMin) return this.setState({ formError: 'End time must be after start time.' });
+      if (!f.title.trim()) return this.setState({ formError: 'Please enter a booking title.', canOverride: false });
+      if (!f.name || !f.email || !GENERIC_EMAIL_RE.test(f.email)) return this.setState({ formError: 'Please select who this booking is for.', canOverride: false });
+      if (f.endMin <= f.startMin) return this.setState({ formError: 'End time must be after start time.', canOverride: false });
       var dur = f.endMin - f.startMin;
       if (f.studio === 1) {
-        if (f.startMin % 60 !== 10) return this.setState({ formError: 'Radio shows start 10 minutes past the hour.' });
-        if (dur !== 60 && dur !== 120) return this.setState({ formError: 'Radio shows run for 1 or 2 hours.' });
+        if (f.startMin % 60 !== 10) return this.setState({ formError: 'Radio shows start 10 minutes past the hour.', canOverride: false });
+        if (dur !== 60 && dur !== 120) return this.setState({ formError: 'Radio shows run for 1 or 2 hours.', canOverride: false });
       } else {
-        if (dur < 30) return this.setState({ formError: 'Minimum booking length is 30 minutes.' });
-        if (!f.admin && dur > 120) return this.setState({ formError: 'Members can book a maximum of 2 hours.' });
+        if (!f.admin) {
+          if (dur < 30 || dur > 60) return this.setState({ formError: 'DJ slots must be between 30 minutes and 1 hour.', canOverride: false });
+        } else if (dur < 30) {
+          return this.setState({ formError: 'Minimum booking length is 30 minutes.', canOverride: false });
+        }
       }
-      if (f.repeat === 'weekly' && !this.state.admin) return this.setState({ formError: 'Only admins can create repeating bookings.' });
-      if (this.overlaps(f)) return this.setState({ formError: 'That time overlaps an existing booking in this studio.' });
+      if (f.repeat === 'weekly' && !this.state.admin) return this.setState({ formError: 'Only admins can create repeating bookings.', canOverride: false });
+      if (this.overlaps(f)) return this.setState({ formError: 'That time overlaps an existing booking in this studio.', canOverride: false });
+
       var memberRequest = !this.state.admin && !!f.repeatRequest;
-      var rec = { id: f.id || ('b' + Date.now() + Math.floor(Math.random() * 999)), studio: f.studio, title: f.title.trim(), name: f.name.trim(), email: f.email.trim(), description: f.description.trim(), admin: !!f.admin && this.state.admin, repeat: f.repeat, pendingRepeat: memberRequest, isPodcast: !!f.isPodcast, icon: f.icon || null, color: f.color || null, date: f.date, startMin: f.startMin, endMin: f.endMin, repeatUntil: f.repeatUntil || null };
-      this.setState({ saving: true, formError: '' });
+      var isAdhocDj = f.studio === 2 && !this.state.admin && !memberRequest;
+      var overLimit = false;
+      if (isAdhocDj) {
+        var used = this.djWeeklyUsedMin(f.email, f.date, f.id);
+        overLimit = (used + dur) > 120;
+        if (overLimit && !overrideRequest) {
+          return this.setState({
+            formError: 'That would put you over your 2-hour weekly DJ limit (' + (used / 60) + 'h already booked this week). You can request an admin override instead.',
+            canOverride: true
+          });
+        }
+      }
+
+      var rec = { id: f.id || ('b' + Date.now() + Math.floor(Math.random() * 999)), studio: f.studio, title: f.title.trim(), name: f.name.trim(), email: f.email.trim(), description: f.description.trim(), admin: !!f.admin && this.state.admin, repeat: f.repeat, pendingRepeat: memberRequest, isPodcast: !!f.isPodcast, color: f.color || null, date: f.date, startMin: f.startMin, endMin: f.endMin, repeatUntil: f.repeatUntil || null, overrideRequest: overLimit && !!overrideRequest };
+      this.setState({ saving: true, formError: '', canOverride: false });
       var req = this.state.admin ? api('POST', '/api/admin/bookings', rec) : api('POST', '/api/bookings', rec);
       req.then(function (saved) {
         var list = this.state.bookings.slice();
@@ -327,9 +343,34 @@
         this.setState(function (s) { return { members: s.members.filter(function (m) { return m.id !== id; }) }; });
       }.bind(this)).catch(function (e) { this.flashAdminError('Could not remove member: ' + e.message); }.bind(this));
     }
+    approveMember(id) {
+      api('POST', '/api/admin/members/' + encodeURIComponent(id) + '/approve').then(function (m) {
+        this.setState(function (s) {
+          return {
+            pendingMembers: s.pendingMembers.filter(function (x) { return x.id !== id; }),
+            members: s.members.concat([m]).sort(function (a, b) { return a.name.localeCompare(b.name); })
+          };
+        });
+      }.bind(this)).catch(function (e) { this.flashAdminError('Could not approve: ' + e.message); }.bind(this));
+    }
+    denyMember(id) {
+      api('DELETE', '/api/admin/members/' + encodeURIComponent(id)).then(function () {
+        this.setState(function (s) { return { pendingMembers: s.pendingMembers.filter(function (m) { return m.id !== id; }) }; });
+      }.bind(this)).catch(function (e) { this.flashAdminError('Could not deny: ' + e.message); }.bind(this));
+    }
+    approveOverride(id) {
+      api('POST', '/api/admin/bookings/' + encodeURIComponent(id) + '/approve-override').then(function (saved) {
+        this.persist(this.state.bookings.map(function (x) { return x.id === id ? saved : x; }));
+      }.bind(this)).catch(function (e) { this.flashAdminError('Could not approve: ' + e.message); }.bind(this));
+    }
+    denyOverride(id) {
+      api('POST', '/api/admin/bookings/' + encodeURIComponent(id) + '/deny-override').then(function () {
+        this.persist(this.state.bookings.filter(function (x) { return x.id !== id; }));
+      }.bind(this)).catch(function (e) { this.flashAdminError('Could not deny: ' + e.message); }.bind(this));
+    }
 
     toggleAdmin() {
-      if (this.state.admin) { api('POST', '/api/admin/logout').catch(function () {}); this.setState({ admin: false }); }
+      if (this.state.admin) { api('POST', '/api/admin/logout').catch(function () {}); this.setState({ admin: false, pendingMembers: [] }); }
       else this.setState({ modal: 'login', loginError: '', loginPass: '' });
     }
     attemptLogin() {
@@ -338,6 +379,7 @@
       this.setState({ loginBusy: true, loginError: '' });
       api('POST', '/api/admin/login', { passphrase: pass }).then(function () {
         this.setState({ loginBusy: false, admin: true, modal: null, loginPass: '' });
+        this.refreshPendingMembers();
       }.bind(this)).catch(function (e) {
         this.setState({ loginBusy: false, loginError: e.message || 'Incorrect passphrase.' });
       }.bind(this));
@@ -365,6 +407,7 @@
     }
     pendingRequests() { return this.state.bookings.filter(function (b) { return b.pendingRepeat; }); }
     pendingCancellations() { return this.state.bookings.filter(function (b) { return b.pendingCancel; }); }
+    pendingOverrides() { return this.state.bookings.filter(function (b) { return b.pendingApproval; }); }
 
     /* ---------- easter egg (unchanged behaviour, ported to refs/classes) ---------- */
     openEgg() { this.setState({ egg: true }); }
@@ -486,6 +529,15 @@
     /* ---------- who picker (member registry) ---------- */
     renderWho() {
       var f = this.state.form;
+      if (this.state.regSubmitted) {
+        return h('div', { className: 'urb-who-box' },
+          h('div', { style: { fontWeight: 700, fontSize: '13.5px', marginBottom: '4px' } }, 'Registration sent'),
+          h('div', { className: 'urb-row-sub' }, 'Your registration is awaiting admin approval. Once approved, select yourself from the list to book.'),
+          h('div', { className: 'urb-register-toggle' },
+            h('button', { className: 'urb-link-btn', onClick: function () { this.setState({ regSubmitted: false }); }.bind(this) }, 'Back to member list')
+          )
+        );
+      }
       if (this.state.registering) {
         return h('div', { className: 'urb-who-box' },
           h('div', { className: 'urb-field' }, this.labelEl('Your name'), this.input({ value: this.state.regName, autoFocus: true, onChange: function (e) { this.setState({ regName: e.target.value }); }.bind(this) })),
@@ -493,7 +545,7 @@
           this.state.regError ? h('div', { className: 'urb-error' }, this.state.regError) : null,
           h('div', { className: 'urb-actions', style: { marginTop: '10px' } },
             h('button', { className: 'btn btn-ghost btn-md btn-wide', onClick: this.cancelRegister.bind(this) }, 'Cancel'),
-            h('button', { className: 'btn btn-primary btn-md btn-wide', disabled: this.state.regBusy, onClick: this.submitRegister.bind(this) }, this.state.regBusy ? 'Registering…' : 'Register & select')
+            h('button', { className: 'btn btn-primary btn-md btn-wide', disabled: this.state.regBusy, onClick: this.submitRegister.bind(this) }, this.state.regBusy ? 'Registering…' : 'Register')
           )
         );
       }
@@ -535,7 +587,6 @@
       if (locked) meta.push(h('span', { key: 'l', title: 'Admin booking' }, '🔒'));
       var children = [
         h('div', { key: 'h', className: 'urb-block-head' },
-          b.icon ? h('img', { className: 'urb-block-icon', src: b.icon, alt: '' }) : null,
           h('span', { className: 'urb-block-title' }, b.title),
           meta.length ? h('span', { className: 'urb-block-meta' }, meta) : null
         )
@@ -634,7 +685,6 @@
             h('div', { style: { fontSize: '13px', fontWeight: 700, color: 'var(--accent)', marginBottom: '12px' } }, '📅 ' + dayLabel),
             h('div', { className: 'urb-field' }, this.labelEl('Title *'), this.input({ value: f.title, placeholder: 'e.g. Afternoon Session', autoFocus: !f.id, onChange: function (e) { this.setField('title', e.target.value); }.bind(this) })),
             h('div', { className: 'urb-field' }, this.labelEl('Booked by *'), this.renderWho()),
-            this.renderIconField(f),
             this.renderTimeFields(f),
             h('div', { className: 'urb-field' }, this.labelEl('Description'), h('textarea', { className: 'urb-textarea', value: f.description, rows: 2, placeholder: 'Optional notes', onChange: function (e) { this.setField('description', e.target.value); }.bind(this) })),
             h('div', { className: 'urb-field' }, this.labelEl('Colour'),
@@ -659,7 +709,8 @@
               f.id ? h('button', { className: this.btnClass('danger'), disabled: this.state.saving, onClick: this.deleteBooking.bind(this) }, 'Delete') : null,
               h('div', { style: { flex: 1 } }),
               h('button', { className: this.btnClass('ghost'), onClick: this.closeModal.bind(this) }, 'Cancel'),
-              h('button', { className: this.btnClass('primary'), disabled: this.state.saving, onClick: this.saveBooking.bind(this) }, this.state.saving ? 'Saving…' : (f.id ? 'Save changes' : 'Create booking'))
+              this.state.canOverride ? h('button', { className: this.btnClass('ghost'), disabled: this.state.saving, onClick: function () { this.saveBooking(true); }.bind(this) }, 'Request admin override') : null,
+              h('button', { className: this.btnClass('primary'), disabled: this.state.saving, onClick: function () { this.saveBooking(false); }.bind(this) }, this.state.saving ? 'Saving…' : (f.id ? 'Save changes' : 'Create booking'))
             )
           )
         )
@@ -668,15 +719,7 @@
     setBookingType(weekly) {
       if (this.state.admin) this.setField('repeat', weekly ? 'weekly' : 'none');
       else this.setField('repeatRequest', weekly);
-    }
-    renderIconField(f) {
-      return h('div', { className: 'urb-field' }, this.labelEl('Show icon'),
-        h('div', { style: { display: 'flex', alignItems: 'center', gap: '10px' } },
-          f.icon ? h('img', { src: f.icon, className: 'urb-icon-preview' }) : h('div', { className: 'urb-icon-preview urb-icon-preview-empty' }),
-          h('input', { type: 'file', accept: 'image/png,image/jpeg,image/webp', onChange: function (e) { this.uploadIcon(e.target.files[0]); }.bind(this) }),
-          this.state.iconUploading ? h('span', { className: 'urb-row-sub' }, 'Uploading…') : null
-        )
-      );
+      this.setState({ canOverride: false, formError: '' });
     }
     renderTimeFields(f) {
       if (f.studio === 1) {
@@ -698,12 +741,30 @@
           }, durOpts.map(function (d) { return h('option', { key: d, value: d }, d + ' hour' + (d > 1 ? 's' : '')); })))
         );
       }
+      var capped = f.studio === 2 && !this.state.admin;
       var startOpts = this.timeOptions(0, 1440 - SNAP);
-      var endOpts = this.timeOptions(SNAP, 1440);
-      return h('div', { style: { display: 'grid', gridTemplateColumns: '1fr auto 1fr', gap: '10px', alignItems: 'end', marginBottom: '12px' } },
-        h('div', null, this.labelEl('Start'), h('select', { className: 'urb-select', value: f.startMin, onChange: function (e) { var v = +e.target.value; var ne = Math.min(1440, Math.max(v + SNAP, f.endMin)); this.setState(function (s) { return { form: Object.assign({}, s.form, { startMin: v, endMin: ne }) }; }); }.bind(this) }, startOpts.map(function (m) { return h('option', { key: m, value: m }, this.minLabel(m)); }, this))),
-        h('div', { style: { paddingBottom: '10px', color: 'var(--faint)', fontWeight: 700 } }, '→'),
-        h('div', null, this.labelEl('End'), h('select', { className: 'urb-select', value: f.endMin, onChange: function (e) { this.setField('endMin', +e.target.value); }.bind(this) }, endOpts.filter(function (m) { return m > f.startMin; }).map(function (m) { return h('option', { key: m, value: m }, this.minLabel(m)); }, this)))
+      var maxEnd = capped ? Math.min(1440, f.startMin + 60) : 1440;
+      var endOpts = this.timeOptions(f.startMin + SNAP, maxEnd);
+      var usage = null;
+      if (f.studio === 2 && !this.state.admin && !f.repeatRequest) {
+        var used = this.djWeeklyUsedMin(f.email || '', f.date, f.id);
+        usage = h('div', { className: 'urb-row-sub', style: { marginBottom: '10px' } }, 'DJ time booked this week: ' + (used / 60) + 'h of your 2h limit (plus a separate 1h weekly slot you can request).');
+      }
+      return h('div', null,
+        usage,
+        h('div', { style: { display: 'grid', gridTemplateColumns: '1fr auto 1fr', gap: '10px', alignItems: 'end', marginBottom: '12px' } },
+          h('div', null, this.labelEl('Start'), h('select', {
+            className: 'urb-select', value: f.startMin, onChange: function (e) {
+              var v = +e.target.value;
+              var dur = f.endMin - f.startMin;
+              if (capped) dur = Math.min(Math.max(dur, 30), 60);
+              var ne = Math.min(1440, Math.max(v + SNAP, v + dur));
+              this.setState(function (s) { return { form: Object.assign({}, s.form, { startMin: v, endMin: ne }) }; });
+            }.bind(this)
+          }, startOpts.map(function (m) { return h('option', { key: m, value: m }, this.minLabel(m)); }, this))),
+          h('div', { style: { paddingBottom: '10px', color: 'var(--faint)', fontWeight: 700 } }, '→'),
+          h('div', null, this.labelEl('End'), h('select', { className: 'urb-select', value: f.endMin, onChange: function (e) { this.setField('endMin', +e.target.value); }.bind(this) }, endOpts.filter(function (m) { return m > f.startMin; }).map(function (m) { return h('option', { key: m, value: m }, this.minLabel(m)); }, this)))
+        )
       );
     }
 
@@ -715,7 +776,7 @@
       return h('div', { className: 'urb-overlay urb-fade', onClick: this.closeModal.bind(this) },
         h('div', { className: 'urb-card urb-pop', onClick: function (e) { e.stopPropagation(); } },
           h('div', { className: 'urb-card-head' },
-            b.icon ? h('img', { src: b.icon, className: 'urb-view-icon' }) : h('span', { style: { fontSize: '20px' } }, b.isPodcast ? '🎙' : '📻'),
+            h('span', { style: { fontSize: '20px' } }, b.isPodcast ? '🎙' : '📻'),
             h('div', { className: 'urb-card-head-title' }, b.title)
           ),
           h('div', { className: 'urb-card-body' },
@@ -743,6 +804,8 @@
       if (!this.state.admin) return null;
       var reqs = this.pendingRequests();
       var cancels = this.pendingCancellations();
+      var overrides = this.pendingOverrides();
+      var pendingMembers = this.state.pendingMembers;
       var reqRow = function (b) {
         return h('div', { key: b.id, className: 'urb-req-row' },
           h('div', { style: { flex: 1, minWidth: 0 } },
@@ -763,6 +826,26 @@
           h('button', { className: this.btnClass('danger'), onClick: function () { this.denyCancel(b.id); }.bind(this) }, 'Keep it')
         );
       }.bind(this);
+      var overrideRow = function (b) {
+        return h('div', { key: b.id, className: 'urb-req-row' },
+          h('div', { style: { flex: 1, minWidth: 0 } },
+            h('div', { className: 'urb-row-title' }, b.title + ' — Studio ' + (b.studio === 1 ? 'One' : 'Two')),
+            h('div', { className: 'urb-row-sub' }, b.name + ' · ' + b.date + ' ' + this.minLabel(b.startMin) + '–' + this.minLabel(b.endMin) + ' · over weekly DJ limit')
+          ),
+          h('button', { className: this.btnClass('primary'), onClick: function () { this.approveOverride(b.id); }.bind(this) }, 'Approve'),
+          h('button', { className: this.btnClass('danger'), onClick: function () { this.denyOverride(b.id); }.bind(this) }, 'Deny')
+        );
+      }.bind(this);
+      var pendingMemberRow = function (m) {
+        return h('div', { key: m.id, className: 'urb-member-row' },
+          h('div', { style: { flex: 1, minWidth: 0 } },
+            h('div', { className: 'urb-row-title' }, m.name),
+            h('div', { className: 'urb-row-sub' }, m.email)
+          ),
+          h('button', { className: this.btnClass('primary'), onClick: function () { this.approveMember(m.id); }.bind(this) }, 'Approve'),
+          h('button', { className: this.btnClass('danger'), onClick: function () { this.denyMember(m.id); }.bind(this) }, 'Deny')
+        );
+      }.bind(this);
       var memberRow = function (m) {
         return h('div', { key: m.id, className: 'urb-member-row' },
           h('div', { style: { flex: 1, minWidth: 0 } },
@@ -777,8 +860,16 @@
         h('div', { className: 'urb-admin-title' }, 'Admin'),
         this.state.adminError ? h('div', { className: 'urb-error', style: { marginBottom: '10px' } }, this.state.adminError) : null,
         h('div', { className: 'urb-admin-section' },
+          h('div', { className: 'urb-row-title', style: { marginBottom: '8px' } }, 'Pending member registrations'),
+          pendingMembers.length ? pendingMembers.map(pendingMemberRow) : h('div', { className: 'urb-row-sub' }, 'None.')
+        ),
+        h('div', { className: 'urb-admin-section' },
           h('div', { className: 'urb-row-title', style: { marginBottom: '8px' } }, 'Pending weekly requests'),
           reqs.length ? reqs.map(reqRow) : h('div', { className: 'urb-row-sub' }, 'None.')
+        ),
+        h('div', { className: 'urb-admin-section' },
+          h('div', { className: 'urb-row-title', style: { marginBottom: '8px' } }, 'Pending DJ limit overrides'),
+          overrides.length ? overrides.map(overrideRow) : h('div', { className: 'urb-row-sub' }, 'None.')
         ),
         h('div', { className: 'urb-admin-section' },
           h('div', { className: 'urb-row-title', style: { marginBottom: '8px' } }, 'Pending cancellations'),
