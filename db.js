@@ -66,6 +66,12 @@ if (!existingCols.includes('icon')) db.exec("ALTER TABLE bookings ADD COLUMN ico
 if (!existingCols.includes('pending_approval')) db.exec("ALTER TABLE bookings ADD COLUMN pending_approval INTEGER NOT NULL DEFAULT 0");
 // Roadshow (studio 3) bookings reserve equipment rather than a room: JSON array of equipment ids.
 if (!existingCols.includes('items')) db.exec("ALTER TABLE bookings ADD COLUMN items TEXT");
+// Show type (flagship, training, …) — drives the booking's colour on the grid.
+if (!existingCols.includes('category')) {
+  db.exec("ALTER TABLE bookings ADD COLUMN category TEXT");
+  // The old podcast checkbox became the "Podcast recording" show type.
+  db.exec("UPDATE bookings SET category = 'podcast' WHERE is_podcast = 1");
+}
 
 const existingMemberCols = db.prepare("PRAGMA table_info(members)").all().map(c => c.name);
 // Existing members were trusted under the old no-approval flow, so grandfather them in as approved.
@@ -186,7 +192,7 @@ function rowToBooking(r) {
     startMin: r.start_min, endMin: r.end_min, repeatUntil: r.repeat_until || null,
     isPodcast: !!r.is_podcast, pendingCancel: !!r.pending_cancel,
     pendingApproval: !!r.pending_approval, icon: r.icon || null,
-    items: parseItems(r.items)
+    items: parseItems(r.items), category: r.category || null
   };
 }
 function rowToMember(r) { return { id: r.id, name: r.name, email: r.email, approved: !!r.approved, createdAt: r.created_at }; }
@@ -201,15 +207,15 @@ function getBooking(id) {
 }
 function upsertBooking(b) {
   db.prepare(`
-    INSERT INTO bookings (id, studio, title, name, email, description, is_admin, repeat, pending_repeat, color, date, start_min, end_min, repeat_until, is_podcast, pending_cancel, pending_approval, icon, items)
-    VALUES (@id, @studio, @title, @name, @email, @description, @isAdmin, @repeat, @pendingRepeat, @color, @date, @startMin, @endMin, @repeatUntil, @isPodcast, @pendingCancel, @pendingApproval, @icon, @items)
+    INSERT INTO bookings (id, studio, title, name, email, description, is_admin, repeat, pending_repeat, color, date, start_min, end_min, repeat_until, is_podcast, pending_cancel, pending_approval, icon, items, category)
+    VALUES (@id, @studio, @title, @name, @email, @description, @isAdmin, @repeat, @pendingRepeat, @color, @date, @startMin, @endMin, @repeatUntil, @isPodcast, @pendingCancel, @pendingApproval, @icon, @items, @category)
     ON CONFLICT(id) DO UPDATE SET
       studio=excluded.studio, title=excluded.title, name=excluded.name, email=excluded.email,
       description=excluded.description, is_admin=excluded.is_admin, repeat=excluded.repeat,
       pending_repeat=excluded.pending_repeat, color=excluded.color, date=excluded.date,
       start_min=excluded.start_min, end_min=excluded.end_min, repeat_until=excluded.repeat_until,
       is_podcast=excluded.is_podcast, pending_cancel=excluded.pending_cancel, pending_approval=excluded.pending_approval,
-      icon=excluded.icon, items=excluded.items
+      icon=excluded.icon, items=excluded.items, category=excluded.category
   `).run({
     id: b.id, studio: b.studio, title: b.title, name: b.name, email: b.email,
     description: b.description || '', isAdmin: b.admin ? 1 : 0, repeat: b.repeat || 'none',
@@ -217,7 +223,8 @@ function upsertBooking(b) {
     startMin: b.startMin, endMin: b.endMin, repeatUntil: b.repeatUntil || null,
     isPodcast: b.isPodcast ? 1 : 0, pendingCancel: b.pendingCancel ? 1 : 0,
     pendingApproval: b.pendingApproval ? 1 : 0, icon: b.icon || null,
-    items: Array.isArray(b.items) && b.items.length ? JSON.stringify(b.items) : null
+    items: Array.isArray(b.items) && b.items.length ? JSON.stringify(b.items) : null,
+    category: b.category || null
   });
   return getBooking(b.id);
 }

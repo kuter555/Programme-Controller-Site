@@ -18,6 +18,20 @@ const BATH_EMAIL_RE = /^[a-z0-9._%+-]+@bath\.ac\.uk$/i;
 const GENERIC_EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const ICON_PATH_RE = /^\/uploads\/[a-zA-Z0-9._-]+$/;
+// Show types for Studio One/Two bookings (colours live in app.js).
+const CATEGORIES = ['flagship', 'training', 'talk', 'music', 'specialist', 'news', 'podcast', 'events', 'other'];
+// Normalises b.category in place; returns an error string or null.
+function checkCategory(b, required) {
+  if (b.studio === 3) { b.category = null; return null; }
+  if (!b.category) {
+    if (required) return 'Please choose a show type.';
+    b.category = null;
+  } else if (CATEGORIES.indexOf(b.category) < 0) {
+    return 'Unknown show type.';
+  }
+  b.isPodcast = b.category === 'podcast';
+  return null;
+}
 const SESSION_COOKIE = 'urb_admin';
 // Sessions live in the database (so restarts don't sign admins out) and slide:
 // every admin request pushes the expiry back, so an admin actively using the
@@ -176,7 +190,7 @@ function validateMemberBooking(b, s) {
   if (b.repeat === 'weekly') return 'Only admins can create repeating bookings.';
   if (b.admin) return 'Only admins can create locked bookings.';
   if (b.icon && !ICON_PATH_RE.test(b.icon)) b.icon = null;
-  return null;
+  return checkCategory(b, true);
 }
 app.post('/api/bookings', (req, res) => {
   const b = req.body;
@@ -246,6 +260,9 @@ app.post('/api/admin/bookings', requireAdmin, (req, res) => {
   if (b.startMin < 0 || b.startMin >= 1440 || b.endMin <= b.startMin) return res.status(400).json({ error: 'End time must be after start time.' });
   if (b.studio === 1 && b.startMin % 60 !== 10) return res.status(400).json({ error: 'Radio shows start 10 minutes past the hour.' });
   if (b.icon && !ICON_PATH_RE.test(b.icon)) b.icon = null;
+  // Admins may leave older, pre-category bookings untyped.
+  const cErr = checkCategory(b, false);
+  if (cErr) return res.status(400).json({ error: cErr });
   if (b.studio === 3) {
     const rErr = checkRoadshow(b);
     if (rErr) return res.status(400).json({ error: rErr });
