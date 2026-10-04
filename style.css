@@ -324,3 +324,70 @@ button{-webkit-tap-highlight-color:transparent;}
 .urb-key.compact{flex:none;gap:3px 10px;align-items:center;padding:6px 8px 8px;background:var(--panel);border-top:1px solid var(--border);}
 .urb-key.compact .urb-key-item{font-size:10.5px;}
 .urb-key.compact .urb-key-dot{width:10px;height:10px;}
+
+/* member accounts */
+.urb-header-actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center;}
+.urb-hint-box{font-size:12.5px;color:var(--dim);background:var(--chip);border:1px solid var(--border);border-radius:9px;padding:9px 11px;margin-bottom:12px;line-height:1.4;}
+.urb-hint-box .urb-link-btn{font-size:12.5px;}
+.urb-acct-links{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-top:14px;}
+
+/* members page */
+.urb-stat-row{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;}
+.urb-stat{padding:7px 12px;border-radius:9px;background:var(--panel-alt);border:1px solid var(--border);font-size:12.5px;font-weight:600;color:var(--dim);}
+.urb-stat b{font-size:16px;color:var(--text);margin-right:2px;}
+.urb-stat-media{border-color:#2e9e4f;}
+.urb-stat-media b{color:#1f8a4c;}
+:root[data-theme="dark"] .urb-stat-media b{color:#5fd08f;}
+.urb-member-row{flex-wrap:wrap;}
+.urb-member-row.media{border-left:4px solid #2e9e4f;}
+.urb-tag-media{background:#e3f6ea;border-color:#9fd9b4;color:#1f7a44;}
+:root[data-theme="dark"] .urb-tag-media{background:rgba(46,158,79,.18);border-color:#2e6b44;color:#7fdca3;}
+.urb-break{overflow-wrap:anywhere;}
+.urb-switch{display:inline-flex;align-items:center;gap:8px;cursor:pointer;user-select:none;flex:none;}
+.urb-switch input{position:absolute;opacity:0;width:0;height:0;}
+.urb-switch-track{width:40px;height:23px;border-radius:12px;background:var(--border);position:relative;transition:background .15s;flex:none;}
+.urb-switch-track::after{content:'';position:absolute;top:3px;left:3px;width:17px;height:17px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.3);transition:transform .15s;}
+.urb-switch input:checked + .urb-switch-track{background:#2e9e4f;}
+.urb-switch input:checked + .urb-switch-track::after{transform:translateX(17px);}
+.urb-switch input:focus-visible + .urb-switch-track{box-shadow:0 0 0 2px var(--accent-strong);}
+.urb-switch-label{font-size:12px;font-weight:700;color:var(--dim);}
+
+/* show types page */
+.urb-cat-row{display:flex;align-items:flex-start;gap:10px;padding:10px 11px;border-radius:9px;background:var(--panel-alt);border:1px solid var(--border);margin-bottom:8px;flex-wrap:wrap;}
+.urb-color-input{width:44px;height:44px;padding:0;border:1px solid var(--border);border-radius:9px;background:none;cursor:pointer;flex:none;}
+.urb-color-input::-webkit-color-swatch-wrapper{padding:3px;}
+.urb-color-input::-webkit-color-swatch{border:none;border-radius:6px;}
+.urb-cat-fields{flex:1 1 220px;min-width:0;display:flex;flex-direction:column;gap:6px;}
+.urb-cat-actions{display:flex;gap:6px;align-items:center;flex-wrap:wrap;}
+
+/* ---------- spacing on phones (iPhone etc.) ---------- */
+/* Grid/flex children default to min-width:auto, so wide content (notably iOS
+   date pickers) pushed boxes into each other. Let them shrink instead. */
+.urb-range > div,
+.urb-card-body [style*="grid-template-columns"] > *{min-width:0;}
+.urb-input,.urb-select,.urb-textarea{max-width:100%;min-width:0;}
+/* iOS Safari ignores width on date inputs unless their native look is reset. */
+input[type="date"].urb-input{-webkit-appearance:none;appearance:none;display:block;width:100%;min-height:40px;line-height:1.25;}
+input[type="date"].urb-input::-webkit-date-and-time-value{text-align:left;margin:0;}
+.urb-actions{flex-wrap:wrap;row-gap:8px;}
+.urb-actions .btn{min-width:0;}
+.urb-req-row{flex-wrap:wrap;}
+.urb-req-row > div:first-child{flex:1 1 180px !important;}
+.urb-card-body > * + .urb-field,.urb-card-body > .urb-field{margin-bottom:14px;}
+@media (max-width:760px){
+  /* 16px stops iOS zooming the page when a field is focused. */
+  .urb-input,.urb-select,.urb-textarea{font-size:16px;}
+  .urb-overlay{padding:12px 10px calc(24px + env(safe-area-inset-bottom));}
+  .urb-card-body{padding:14px 14px 16px;}
+  .urb-range{gap:10px 8px;}
+  .urb-header{row-gap:10px;}
+  .urb-toolbar{row-gap:8px;}
+  .urb-setting{flex-wrap:wrap;}
+}
+@media (max-width:520px){
+  .urb-header .urb-spacer{display:none;}
+  .urb-header-actions{width:100%;}
+  .urb-header-actions .btn{flex:1 1 0;padding:0 10px;}
+  .urb-actions .btn-wide{flex:1 1 120px;}
+  .urb-acct-links{flex-direction:column;align-items:flex-start;}
+}

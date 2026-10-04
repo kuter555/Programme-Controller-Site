@@ -14,23 +14,15 @@
     '#0b2f5e', '#2f6fb0', '#3fa7c9', '#1f8a70', '#5fb894', '#9ccc3c', '#f2c14e', '#e0955c',
     '#d9534f', '#e84a8a', '#b05cc4', '#5b4bd1', '#7a5230', '#6c7a89', '#222831'
   ];
-  // Show types for Studio One/Two. The booking's colour comes from its type.
-  var CATEGORIES = [
-    { key: 'flagship', label: 'Flagship', color: '#f2b705' },
-    { key: 'training', label: 'Training', color: '#3fbfcf' },
-    { key: 'talk', label: 'Entertainment / Talk', color: '#e84a8a' },
-    { key: 'music', label: 'General Music', color: '#2f6fb0' },
-    { key: 'specialist', label: 'Specialist Music', color: '#7b4fc9' },
-    { key: 'news', label: 'Journalistic / News', color: '#c0392b' },
-    { key: 'podcast', label: 'Podcast recording', color: '#1f8a70' },
-    { key: 'events', label: 'Events', color: '#f07c2a' },
-    { key: 'other', label: 'Other', color: '#8a96a3' }
-  ];
-  var CATEGORY_HINTS = {
-    specialist: 'A show focused on one genre',
-    events: 'e.g. Varsity, IWD, interviews'
-  };
-  function categoryOf(key) { return CATEGORIES.find(function (c) { return c.key === key; }) || null; }
+  // Show types for Studio One/Two; the booking's colour comes from its type.
+  // Admins edit the list (Categories page), so it's loaded from the server —
+  // App replaces this array whenever a fresh copy arrives.
+  var CATEGORIES = [];
+  // A type that has since been removed reads as "Other" (the server also moves those bookings there).
+  function categoryOf(key) {
+    if (!key) return null;
+    return CATEGORIES.find(function (c) { return c.key === key; }) || CATEGORIES.find(function (c) { return c.key === 'other'; }) || null;
+  }
   var STUDIO_NAMES = { 1: 'Studio One', 2: 'Studio Two', 3: 'Roadshow' };
   var DEFAULT_SETTINGS = {
     djWeeklyCapMin: 120, djMinSlotMin: 30, djMaxSlotMin: 60, radioMaxHours: 2,
@@ -69,7 +61,8 @@
       var prefersDark = false;
       try { prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches; } catch (e) {}
       this.state = {
-        studio: 1, weekStart: null, bookings: [], members: [], pendingMembers: [],
+        studio: 1, weekStart: null, bookings: [], members: [], pendingMembers: [], adminMembers: [], categories: [],
+        member: null, acct: null, memberFilter: 'all', catDrafts: {}, catMsg: '', newCat: { label: '', color: '#6c7a89', hint: '' },
         settings: Object.assign({}, DEFAULT_SETTINGS), equipment: [],
         admin: false, adminError: '', adminNotice: '', page: 'schedule',
         modal: null, form: null, formError: '', saving: false, canOverride: false,
@@ -85,7 +78,8 @@
       // admin mode and ask for the passphrase on top of whatever is open, so an
       // unsaved booking form isn't lost.
       api.onAuthLost = function () {
-        if (!this.state.admin && this.state.reauth) return;
+        // Only prompt someone who was actually in admin mode.
+        if (!this.state.admin) return;
         this.setState({ admin: false, pendingMembers: [], reauth: true, loginPass: '', loginError: 'Your admin session ended — sign in again, then retry.' });
       }.bind(this);
     }
@@ -97,16 +91,22 @@
     dbCheckAdminSession() { return api('GET', '/api/admin/session').then(function (d) { return !!d.admin; }); }
     dbFetchSettings() { return api('GET', '/api/settings'); }
     dbFetchEquipment() { return api('GET', '/api/equipment'); }
+    dbFetchCategories() { return api('GET', '/api/categories'); }
+    dbFetchAccount() { return api('GET', '/api/account').then(function (d) { return d.member || null; }).catch(function () { return null; }); }
+    setCategories(list) { CATEGORIES = list; this.setState({ categories: list }); }
+    // Admin-only lists: pending registrations, plus the full member list with account / media flags.
     refreshPendingMembers() {
       this.dbFetchPendingMembers().then(function (list) { this.setState({ pendingMembers: list }); }.bind(this));
+      api('GET', '/api/admin/members').then(function (list) { this.setState({ adminMembers: list }); }.bind(this)).catch(function () {});
     }
     startPolling() {
       clearInterval(this._pollTimer);
       this._pollTimer = setInterval(function () {
         if (document.hidden) return;
         var wasAdmin = this.state.admin;
-        Promise.all([this.dbFetchBookings(), this.dbFetchMembers(), this.dbCheckAdminSession(), this.dbFetchSettings(), this.dbFetchEquipment()]).then(function (res) {
-          var next = { bookings: res[0], members: res[1], settings: res[3], equipment: res[4] };
+        Promise.all([this.dbFetchBookings(), this.dbFetchMembers(), this.dbCheckAdminSession(), this.dbFetchSettings(), this.dbFetchEquipment(), this.dbFetchCategories()]).then(function (res) {
+          CATEGORIES = res[5];
+          var next = { bookings: res[0], members: res[1], settings: res[3], equipment: res[4], categories: res[5] };
           // Keep the on-screen admin state honest if the session ended in the background.
           if (wasAdmin && !res[2] && this.state.admin) {
             next.admin = false; next.pendingMembers = []; next.page = 'schedule';
@@ -137,9 +137,19 @@
       } catch (e) {}
       this._onResize = function () { if (this.state.fullWeek) this.forceUpdate(); }.bind(this);
       window.addEventListener('resize', this._onResize);
-      Promise.all([this.dbFetchBookings(), this.dbFetchMembers(), this.dbCheckAdminSession(), this.dbFetchPendingMembers(), this.dbFetchSettings(), this.dbFetchEquipment()])
+      // A set-password link from an email lands here as ?setpw=<token>.
+      var setpw = null;
+      try { setpw = new URLSearchParams(window.location.search).get('setpw'); } catch (e) {}
+      if (setpw) {
+        try { window.history.replaceState(null, '', window.location.pathname); } catch (e) {}
+        this.openSetPassword(setpw);
+      }
+      // Admin-only lists are fetched afterwards, and only if this browser is signed in as admin.
+      Promise.all([this.dbFetchBookings(), this.dbFetchMembers(), this.dbCheckAdminSession(), Promise.resolve([]), this.dbFetchSettings(), this.dbFetchEquipment(), this.dbFetchCategories(), this.dbFetchAccount()])
         .then(function (res) {
-          this.setState({ bookings: res[0], members: res[1], admin: res[2], pendingMembers: res[3], settings: res[4], equipment: res[5], dbReady: true });
+          CATEGORIES = res[6];
+          this.setState({ bookings: res[0], members: res[1], admin: res[2], pendingMembers: res[3], settings: res[4], equipment: res[5], categories: res[6], member: res[7], dbReady: true });
+          if (res[2]) this.refreshPendingMembers();
           this.finishLoading();
           this.startPolling();
         }.bind(this)).catch(function (e) {
@@ -225,16 +235,44 @@
       var list = this.state.bookings.filter(function (b) { return b.studio === this.state.studio && !b.pendingApproval; }, this);
       return this.weekDates().map(function (d) { return this.segmentsOn(list, this.fmt(d)); }, this);
     }
-    overlaps(form) {
-      var list = this.state.bookings.filter(function (b) { return b.studio === form.studio && b.id !== form.id && !b.pendingApproval; }, this);
-      var d = this.parse(form.date);
-      for (var k = 0, n = extraDays(form); k <= n; k++) {
-        var s = form.startMin - k * 1440, e = Math.min(1440, form.endMin - k * 1440);
-        var clash = this.segmentsOn(list, this.fmt(this.addDays(d, k))).some(function (o) { return s < o.endMin && o.startMin < e; });
-        if (clash) return true;
+    // Start dates to clash-check for a form: just its date for a one-off, or
+    // the coming weeks (from today, up to 26) for a weekly slot or request —
+    // otherwise a weekly slot could be put on top of a later one-off booking.
+    checkDates(form) {
+      if (form.repeat !== 'weekly' && !form.repeatRequest) return [form.date];
+      var start = dayNum(form.date), today = dayNum(this.fmt(new Date()));
+      var first = start >= today ? start : start + Math.ceil((today - start) / 7) * 7;
+      var until = form.repeatUntil ? dayNum(form.repeatUntil) : Infinity;
+      var out = [], base = this.parse(form.date);
+      for (var w = 0; w < 26; w++) {
+        var dn = first + w * 7;
+        if (dn > until) break;
+        out.push(this.fmt(this.addDays(base, dn - start)));
       }
-      return false;
+      return out.length ? out : [form.date];
     }
+    // The first existing booking this form would sit on top of, or null.
+    findClash(form) {
+      var list = this.state.bookings.filter(function (b) { return b.studio === form.studio && b.id !== form.id && !b.pendingApproval; });
+      var dates = this.checkDates(form);
+      for (var i = 0; i < dates.length; i++) {
+        var d = this.parse(dates[i]);
+        for (var k = 0, n = extraDays(form); k <= n; k++) {
+          var ds = this.fmt(this.addDays(d, k));
+          var s = form.startMin - k * 1440, e = Math.min(1440, form.endMin - k * 1440);
+          var hit = this.segmentsOn(list, ds).find(function (o) { return s < o.endMin && o.startMin < e; });
+          if (hit) return { booking: hit.booking, date: ds };
+        }
+      }
+      return null;
+    }
+    // Has an edit moved the booking from where it already was?
+    slotChanged(f) {
+      var o = f.orig;
+      return !o || o.date !== f.date || o.startMin !== f.startMin || o.endMin !== f.endMin || o.repeat !== f.repeat;
+    }
+    memberMode() { return !!this.state.member && !this.state.admin; }
+    ownsBooking(b) { var m = this.state.member; return !!(m && b && m.email.toLowerCase() === String(b.email).toLowerCase()); }
     // Roadshow: map of equipment id -> the booking already holding it during the form's range.
     itemConflicts(form) {
       var fs = absStart(form), fe = absEnd(form), out = {};
@@ -271,20 +309,25 @@
       this.openNew(this.state.studio, d, startMin, endMin, []);
     }
     openNew(studio, d, startMin, endMin, items) {
+      // Signed-in members always book as themselves.
+      var me = this.memberMode() ? this.state.member : null;
       this.setState({
         modal: 'booking', formError: '', registering: false, canOverride: false,
-        form: { id: null, studio: studio, title: '', memberId: null, name: '', email: '', description: '', admin: this.state.admin, repeat: 'none', repeatRequest: false, category: null, icon: null, items: items, color: null, date: this.fmt(d), startMin: startMin, endMin: endMin, repeatUntil: null }
+        form: { id: null, studio: studio, title: '', memberId: null, name: me ? me.name : '', email: me ? me.email : '', description: '', admin: this.state.admin, repeat: 'none', repeatRequest: false, category: null, icon: null, items: items, color: null, date: this.fmt(d), startMin: startMin, endMin: endMin, repeatUntil: null, orig: null }
       });
     }
+    // Admins can edit anything; a signed-in member can edit their own bookings
+    // exactly as if making them fresh. Everyone else gets the read-only view.
     openEdit(o) {
       var b = o.booking;
-      if (!this.state.admin) {
-        this.setState({ modal: 'view', viewBooking: b });
+      if (!this.state.admin && !this.ownsBooking(b)) {
+        this.setState({ modal: 'view', viewBooking: b, formError: '' });
         return;
       }
+      var cat = b.category ? (categoryOf(b.category) || {}).key : (b.isPodcast ? 'podcast' : null);
       this.setState({
         modal: 'booking', formError: '', registering: false, canOverride: false,
-        form: { id: b.id, studio: b.studio, title: b.title, memberId: null, name: b.name, email: b.email, description: b.description || '', admin: b.admin, repeat: b.repeat, repeatRequest: !!b.pendingRepeat, category: b.category || (b.isPodcast ? 'podcast' : null), icon: b.icon || null, items: (b.items || []).slice(), color: b.color || null, date: b.date, startMin: b.startMin, endMin: b.endMin, repeatUntil: b.repeatUntil }
+        form: { id: b.id, studio: b.studio, title: b.title, memberId: null, name: b.name, email: b.email, description: b.description || '', admin: b.admin, repeat: b.repeat, repeatRequest: !!b.pendingRepeat, category: cat || null, icon: b.icon || null, items: (b.items || []).slice(), color: b.color || null, date: b.date, startMin: b.startMin, endMin: b.endMin, repeatUntil: b.repeatUntil, orig: { date: b.date, startMin: b.startMin, endMin: b.endMin, repeat: b.repeat } }
       });
     }
     setField(k, v) { this.setState(function (s) { var f = Object.assign({}, s.form); f[k] = v; return { form: f }; }); }
@@ -334,23 +377,30 @@
       if (f.endMin <= f.startMin) return 'End time must be after start time.';
       var dur = f.endMin - f.startMin;
       if (f.studio !== 3 && !categoryOf(f.category)) return 'Please choose a show type.';
-      if (f.studio === 1 && f.startMin % 60 !== 10) return 'Radio shows start 10 minutes past the hour.';
-      if (!admin) {
+      // Rules about *when* a booking may be placed only apply if the slot is
+      // new or has moved — so fixing a title on an older booking always works.
+      var moved = this.slotChanged(f);
+      if (moved && f.studio === 1 && f.startMin % 60 !== 10) return 'Radio shows start 10 minutes past the hour.';
+      if (!admin && moved) {
         var ahead = dayNum(f.date) - dayNum(this.fmt(new Date()));
         if (ahead < 0) return 'You can’t book a date in the past.';
         if (s.maxAdvanceDays && ahead > s.maxAdvanceDays) return 'Bookings can only be made up to ' + s.maxAdvanceDays + ' days ahead.';
         if (f.studio === 1 && (dur % 60 !== 0 || dur < 60 || dur > s.radioMaxHours * 60 || f.endMin > 1440)) return 'Radio shows run for 1 to ' + s.radioMaxHours + ' hours and finish by midnight.';
         if (f.studio === 2 && (dur < s.djMinSlotMin || dur > s.djMaxSlotMin || f.endMin > 1440)) return 'DJ slots must be between ' + s.djMinSlotMin + ' and ' + s.djMaxSlotMin + ' minutes and finish by midnight.';
         if (f.studio === 3 && dur > s.roadshowMaxDays * 1440) return 'Roadshow bookings can last at most ' + s.roadshowMaxDays + ' days.';
-        if (f.repeat === 'weekly') return 'Only admins can create repeating bookings.';
       }
+      if (!admin && !f.id && f.repeat === 'weekly') return 'Only admins can create repeating bookings.';
       if (f.studio === 3) {
         if (!f.items.length) return 'Pick at least one piece of equipment.';
         var clashes = this.itemConflicts(f);
         var hit = f.items.filter(function (i) { return clashes[i]; });
         if (hit.length) return hit.map(this.itemName, this).join(', ') + ' is already booked for "' + clashes[hit[0]].title + '" at that time.';
-      } else if (this.overlaps(f)) {
-        return 'That time overlaps an existing booking in this studio.';
+      } else if (moved) {
+        var c = this.findClash(f);
+        if (c) {
+          var cd = this.parse(c.date);
+          return 'That overlaps “' + c.booking.title + '” (' + c.booking.name + ') on ' + DAYS[(cd.getDay() + 6) % 7] + ' ' + cd.getDate() + '/' + (cd.getMonth() + 1) + ', ' + this.rangeLabel(c.booking) + '.';
+        }
       }
       return null;
     }
@@ -361,8 +411,8 @@
       var dur = f.endMin - f.startMin;
       var cap = this.state.settings.djWeeklyCapMin;
 
-      var memberRequest = !this.state.admin && !!f.repeatRequest && f.studio !== 3;
-      var isAdhocDj = f.studio === 2 && !this.state.admin && !memberRequest;
+      var memberRequest = !this.state.admin && !!f.repeatRequest && f.studio !== 3 && f.repeat !== 'weekly';
+      var isAdhocDj = f.studio === 2 && !this.state.admin && !memberRequest && f.repeat !== 'weekly' && this.slotChanged(f);
       var overLimit = false;
       if (isAdhocDj) {
         var used = this.djWeeklyUsedMin(f.email, f.date, f.id);
@@ -391,8 +441,10 @@
     deleteBooking() {
       var f = this.state.form; if (!f.id) return this.closeModal();
       var id = f.id;
+      if (!this.state.admin && !window.confirm('Cancel “' + f.title + '”' + (f.repeat === 'weekly' ? ' — every week of this slot' : '') + '? This can’t be undone.')) return;
       this.setState({ saving: true });
-      api('DELETE', '/api/admin/bookings/' + encodeURIComponent(id)).then(function () {
+      var url = this.state.admin ? '/api/admin/bookings/' : '/api/bookings/';
+      api('DELETE', url + encodeURIComponent(id)).then(function () {
         this.setState({ saving: false });
         this.persist(this.state.bookings.filter(function (b) { return b.id !== id; }));
         this.closeModal();
@@ -442,7 +494,7 @@
     }
     removeMember(id) {
       api('DELETE', '/api/admin/members/' + encodeURIComponent(id)).then(function () {
-        this.setState(function (s) { return { members: s.members.filter(function (m) { return m.id !== id; }) }; });
+        this.setState(function (s) { return { members: s.members.filter(function (m) { return m.id !== id; }), adminMembers: s.adminMembers.filter(function (m) { return m.id !== id; }) }; });
       }.bind(this)).catch(function (e) { this.flashAdminError('Could not remove member: ' + e.message); }.bind(this));
     }
     approveMember(id) {
@@ -453,6 +505,7 @@
             members: s.members.concat([m]).sort(function (a, b) { return a.name.localeCompare(b.name); })
           };
         });
+        this.refreshPendingMembers();
       }.bind(this)).catch(function (e) { this.flashAdminError('Could not approve: ' + e.message); }.bind(this));
     }
     denyMember(id) {
@@ -745,6 +798,14 @@
     /* ---------- who picker (member registry) ---------- */
     renderWho() {
       var f = this.state.form;
+      if (this.memberMode()) {
+        return h('div', { className: 'urb-who-box' },
+          h('div', { className: 'urb-who-selected' },
+            h('div', null, h('div', { className: 'urb-who-name' }, f.name), h('div', { className: 'urb-who-email' }, f.email)),
+            h('span', { className: 'urb-tag' }, 'You')
+          )
+        );
+      }
       if (this.state.regSubmitted) {
         return h('div', { className: 'urb-who-box' },
           h('div', { style: { fontWeight: 700, fontSize: '13.5px', marginBottom: '4px' } }, 'Registration sent'),
@@ -1058,7 +1119,9 @@
                 COLORS.map(function (c) { return h('button', { key: c, className: 'urb-color-dot' + (f.color === c ? ' selected' : ''), style: { background: c }, title: c, onClick: function () { this.setField('color', f.color === c ? null : c); }.bind(this) }); }, this)
               )
             ) : null,
-            isRoadshow ? null : h('div', { className: 'urb-field' }, this.labelEl('Booking type'),
+            isRoadshow ? null : (!this.state.admin && f.repeat === 'weekly') ? h('div', { className: 'urb-field' }, this.labelEl('Booking type'),
+              h('div', { className: 'urb-row-sub' }, '↻ Weekly slot — changes apply to every week. Ask an admin to stop it repeating.')
+            ) : h('div', { className: 'urb-field' }, this.labelEl('Booking type'),
               h('div', { className: 'urb-radio-row' },
                 h('label', { className: 'urb-radio' },
                   h('input', { type: 'radio', name: 'btype', checked: !isWeekly, onChange: function () { this.setBookingType(false); }.bind(this) }), 'One-off booking'),
@@ -1068,9 +1131,9 @@
             ),
             this.state.formError ? h('div', { className: 'urb-error-box' }, this.state.formError) : null,
             h('div', { className: 'urb-actions' },
-              f.id ? h('button', { className: this.btnClass('danger'), disabled: this.state.saving, onClick: this.deleteBooking.bind(this) }, 'Delete') : null,
+              f.id ? h('button', { className: this.btnClass('danger'), disabled: this.state.saving, onClick: this.deleteBooking.bind(this) }, this.state.admin ? 'Delete' : 'Cancel booking') : null,
               h('div', { style: { flex: 1 } }),
-              h('button', { className: this.btnClass('ghost'), onClick: this.closeModal.bind(this) }, 'Cancel'),
+              h('button', { className: this.btnClass('ghost'), onClick: this.closeModal.bind(this) }, 'Close'),
               this.state.canOverride ? h('button', { className: this.btnClass('ghost'), disabled: this.state.saving, onClick: function () { this.saveBooking(true); }.bind(this) }, 'Request admin override') : null,
               h('button', { className: this.btnClass('primary'), disabled: this.state.saving, onClick: function () { this.saveBooking(false); }.bind(this) }, this.state.saving ? 'Saving…' : (f.id ? 'Save changes' : 'Create booking'))
             )
@@ -1197,7 +1260,7 @@
           h('span', { className: 'urb-cat-dot', style: { background: cat ? cat.color : 'transparent', borderStyle: cat ? 'solid' : 'dashed' } }),
           h('select', { className: 'urb-select', value: f.category || '', onChange: function (e) { this.setField('category', e.target.value || null); this.setState({ formError: '' }); }.bind(this) },
             h('option', { value: '', disabled: true }, 'Select show type…'),
-            CATEGORIES.map(function (c) { return h('option', { key: c.key, value: c.key }, c.label + (CATEGORY_HINTS[c.key] ? ' — ' + CATEGORY_HINTS[c.key] : '')); })
+            CATEGORIES.map(function (c) { return h('option', { key: c.key, value: c.key }, c.label + (c.hint ? ' — ' + c.hint : '')); })
           )
         )
       );
@@ -1205,7 +1268,7 @@
     renderCategoryKey(compact) {
       return h('div', { className: 'urb-key' + (compact ? ' compact' : '') },
         CATEGORIES.map(function (c) {
-          return h('span', { key: c.key, className: 'urb-key-item', title: CATEGORY_HINTS[c.key] || c.label },
+          return h('span', { key: c.key, className: 'urb-key-item', title: c.hint || c.label },
             h('span', { className: 'urb-key-dot', style: { background: c.color } }), c.label);
         })
       );
@@ -1301,6 +1364,10 @@
               b.repeat === 'weekly' ? h('span', { className: 'urb-row-sub' }, '↻ Weekly slot') : null,
               b.admin ? h('span', { className: 'urb-row-sub' }, '🔒 Admin booking') : null
             ),
+            this.state.member ? null : h('div', { className: 'urb-hint-box' },
+              'Is this your booking? ',
+              h('button', { className: 'urb-link-btn', onClick: function () { this.openAccount('login'); }.bind(this) }, 'Log in'),
+              ' to change or cancel it yourself.'),
             this.state.formError ? h('div', { className: 'urb-error-box' }, this.state.formError) : null,
             h('div', { className: 'urb-actions' },
               h('button', { className: this.btnClass('ghost', true), onClick: this.closeModal.bind(this) }, 'Close'),
@@ -1385,22 +1452,253 @@
         ) : null
       );
     }
+    setMediaMember(m, value) {
+      this.setState(function (s) { return { adminMembers: s.adminMembers.map(function (x) { return x.id === m.id ? Object.assign({}, x, { mediaMember: value }) : x; }) }; });
+      api('PUT', '/api/admin/members/' + m.id + '/media', { mediaMember: value }).then(function (saved) {
+        this.setState(function (s) { return { adminMembers: s.adminMembers.map(function (x) { return x.id === saved.id ? saved : x; }) }; });
+      }.bind(this)).catch(function (e) {
+        this.flashAdminError('Could not update ' + m.name + ': ' + e.message);
+        this.refreshPendingMembers();
+      }.bind(this));
+    }
     renderMembersPage() {
+      var all = this.state.adminMembers;
+      var media = all.filter(function (m) { return m.mediaMember; }).length;
+      var accounts = all.filter(function (m) { return m.hasAccount; }).length;
+      var filter = this.state.memberFilter;
+      var shown = all.filter(function (m) { return filter === 'all' || (filter === 'media' ? m.mediaMember : !m.mediaMember); });
+      var chip = function (key, label) {
+        return h('button', { key: key, className: 'btn btn-sm' + (filter === key ? ' btn-primary' : ''), onClick: function () { this.setState({ memberFilter: key }); }.bind(this) }, label);
+      }.bind(this);
       var memberRow = function (m) {
-        return h('div', { key: m.id, className: 'urb-member-row' },
-          h('div', { style: { flex: 1, minWidth: 0 } },
-            h('div', { className: 'urb-row-title' }, m.name),
-            h('div', { className: 'urb-row-sub' }, m.email)
+        return h('div', { key: m.id, className: 'urb-member-row' + (m.mediaMember ? ' media' : '') },
+          h('div', { style: { flex: '1 1 160px', minWidth: 0 } },
+            h('div', { className: 'urb-row-title' }, m.name,
+              m.mediaMember ? h('span', { className: 'urb-tag urb-tag-media' }, 'Media member') : null,
+              m.hasAccount ? h('span', { className: 'urb-tag', title: 'Has set a password and can edit their own bookings' }, 'Account') : null),
+            h('div', { className: 'urb-row-sub urb-break' }, m.email)
           ),
-          h('button', { className: this.btnClass('danger'), onClick: function () { this.removeMember(m.id); }.bind(this) }, 'Remove')
+          h('label', { className: 'urb-switch', title: 'Media membership' },
+            h('input', { type: 'checkbox', checked: m.mediaMember, onChange: function (e) { this.setMediaMember(m, e.target.checked); }.bind(this) }),
+            h('span', { className: 'urb-switch-track' }),
+            h('span', { className: 'urb-switch-label' }, 'Media membership')
+          ),
+          h('button', { className: this.btnClass('danger'), onClick: function () {
+            if (window.confirm('Remove ' + m.name + '? Their bookings stay, but they will have to register again to book.')) this.removeMember(m.id);
+          }.bind(this) }, 'Remove')
         );
       }.bind(this);
       return h('div', { className: 'urb-admin-panel urb-page-panel' },
-        h('div', { className: 'urb-admin-title' }, 'Registered members (' + this.state.members.length + ')'),
-        h('div', { className: 'urb-row-sub' }, 'New registrations wait under Admin on the Schedule tab until you approve them.'),
+        h('div', { className: 'urb-admin-title' }, 'Registered members'),
+        h('div', { className: 'urb-stat-row' },
+          h('div', { className: 'urb-stat' }, h('b', null, all.length), ' members'),
+          h('div', { className: 'urb-stat urb-stat-media' }, h('b', null, media), ' with media membership'),
+          h('div', { className: 'urb-stat' }, h('b', null, accounts), ' have an account')
+        ),
+        h('div', { className: 'urb-row-sub' }, 'New registrations wait under Admin on the Schedule tab until you approve them. “Account” means they have set a password and can edit their own bookings.'),
         this.state.adminError ? h('div', { className: 'urb-error' }, this.state.adminError) : null,
+        h('div', { className: 'urb-admin-nav', style: { marginTop: '12px' } }, chip('all', 'All'), chip('media', 'Media members'), chip('nonmedia', 'No media membership')),
         h('div', { className: 'urb-admin-section' },
-          this.state.members.length ? this.state.members.map(memberRow) : h('div', { className: 'urb-row-sub' }, 'No one has registered yet.')
+          shown.length ? shown.map(memberRow) : h('div', { className: 'urb-row-sub' }, all.length ? 'No one matches this filter.' : 'No one has registered yet.')
+        )
+      );
+    }
+
+    /* ---------- show categories (admin) ---------- */
+    catDraft(c) { return this.state.catDrafts[c.key] || c; }
+    setCatDraft(c, k, v) {
+      this.setState(function (s) {
+        var d = Object.assign({}, s.catDrafts); d[c.key] = Object.assign({}, d[c.key] || c); d[c.key][k] = v;
+        return { catDrafts: d, catMsg: '' };
+      });
+    }
+    saveCategory(c) {
+      var d = this.catDraft(c);
+      api('PUT', '/api/admin/categories/' + encodeURIComponent(c.key), { label: d.label, color: d.color, hint: d.hint }).then(function (saved) {
+        var drafts = Object.assign({}, this.state.catDrafts); delete drafts[c.key];
+        this.setState({ catDrafts: drafts });
+        this.setCategories(this.state.categories.map(function (x) { return x.key === saved.key ? saved : x; }));
+      }.bind(this)).catch(function (e) { this.setState({ catMsg: e.message }); }.bind(this));
+    }
+    moveCategory(c, dir) {
+      api('POST', '/api/admin/categories/' + encodeURIComponent(c.key) + '/move', { dir: dir }).then(this.setCategories.bind(this))
+        .catch(function (e) { this.setState({ catMsg: e.message }); }.bind(this));
+    }
+    deleteCategory(c) {
+      var used = this.state.bookings.filter(function (b) { return b.category === c.key; }).length;
+      if (!window.confirm('Remove “' + c.label + '”?' + (used ? ' ' + used + ' booking' + (used > 1 ? 's' : '') + ' will become “Other”.' : ''))) return;
+      api('DELETE', '/api/admin/categories/' + encodeURIComponent(c.key)).then(function () {
+        this.setCategories(this.state.categories.filter(function (x) { return x.key !== c.key; }));
+        this.setState(function (s) { return { bookings: s.bookings.map(function (b) { return b.category === c.key ? Object.assign({}, b, { category: 'other', isPodcast: false }) : b; }) }; });
+      }.bind(this)).catch(function (e) { this.setState({ catMsg: e.message }); }.bind(this));
+    }
+    addCategory() {
+      var n = this.state.newCat;
+      if (!n.label.trim()) return this.setState({ catMsg: 'Give the new show type a name.' });
+      api('POST', '/api/admin/categories', n).then(function (c) {
+        this.setCategories(this.state.categories.concat([c]));
+        this.setState({ newCat: { label: '', color: '#6c7a89', hint: '' }, catMsg: '' });
+      }.bind(this)).catch(function (e) { this.setState({ catMsg: e.message }); }.bind(this));
+    }
+    renderCategoriesPage() {
+      var list = this.state.categories;
+      var rows = list.map(function (c, i) {
+        var d = this.catDraft(c);
+        var dirty = d.label !== c.label || d.color !== c.color || (d.hint || '') !== (c.hint || '');
+        var used = this.state.bookings.filter(function (b) { return b.category === c.key; }).length;
+        return h('div', { key: c.key, className: 'urb-cat-row' },
+          h('input', { type: 'color', className: 'urb-color-input', value: d.color, title: 'Colour', onChange: function (e) { this.setCatDraft(c, 'color', e.target.value); }.bind(this) }),
+          h('div', { className: 'urb-cat-fields' },
+            this.input({ value: d.label, placeholder: 'Name', onChange: function (e) { this.setCatDraft(c, 'label', e.target.value); }.bind(this) }),
+            this.input({ value: d.hint || '', placeholder: 'Hint shown in the dropdown (optional)', onChange: function (e) { this.setCatDraft(c, 'hint', e.target.value); }.bind(this) }),
+            h('div', { className: 'urb-row-sub' }, used + ' booking' + (used === 1 ? '' : 's') + (c.key === 'other' ? ' · removed types fall back to this one' : ''))
+          ),
+          h('div', { className: 'urb-cat-actions' },
+            h('button', { className: 'btn btn-icon', disabled: i === 0, title: 'Move up', onClick: function () { this.moveCategory(c, -1); }.bind(this) }, '↑'),
+            h('button', { className: 'btn btn-icon', disabled: i === list.length - 1, title: 'Move down', onClick: function () { this.moveCategory(c, 1); }.bind(this) }, '↓'),
+            dirty ? h('button', { className: this.btnClass('primary'), onClick: function () { this.saveCategory(c); }.bind(this) }, 'Save') : null,
+            c.key === 'other' ? null : h('button', { className: this.btnClass('danger'), onClick: function () { this.deleteCategory(c); }.bind(this) }, 'Remove')
+          )
+        );
+      }, this);
+      var n = this.state.newCat;
+      var setNew = function (k, v) { this.setState(function (s) { var x = Object.assign({}, s.newCat); x[k] = v; return { newCat: x, catMsg: '' }; }); }.bind(this);
+      return h('div', { className: 'urb-admin-panel urb-page-panel' },
+        h('div', { className: 'urb-admin-title' }, 'Show types & colours'),
+        h('div', { className: 'urb-row-sub' }, 'These appear in the booking dropdown and the colour key, in this order. Removing one moves its bookings to “Other”.'),
+        this.state.catMsg ? h('div', { className: 'urb-error' }, this.state.catMsg) : null,
+        h('div', { className: 'urb-admin-section' }, rows),
+        h('div', { className: 'urb-admin-section' },
+          h('div', { className: 'urb-row-title', style: { marginBottom: '8px' } }, 'Add a show type'),
+          h('div', { className: 'urb-cat-row' },
+            h('input', { type: 'color', className: 'urb-color-input', value: n.color, onChange: function (e) { setNew('color', e.target.value); } }),
+            h('div', { className: 'urb-cat-fields' },
+              this.input({ value: n.label, placeholder: 'Name, e.g. Comedy', onChange: function (e) { setNew('label', e.target.value); }, onKeyDown: function (e) { if (e.key === 'Enter') this.addCategory(); }.bind(this) }),
+              this.input({ value: n.hint, placeholder: 'Hint (optional)', onChange: function (e) { setNew('hint', e.target.value); } })
+            ),
+            h('div', { className: 'urb-cat-actions' }, h('button', { className: this.btnClass('primary'), onClick: this.addCategory.bind(this) }, 'Add'))
+          )
+        )
+      );
+    }
+
+    /* ---------- member accounts ---------- */
+    // acct.mode: 'login' | 'link' (create account / forgot password) | 'sent' | 'setpw' | 'me'
+    openAccount(mode) {
+      var email = (this.state.acct && this.state.acct.email) || '';
+      this.setState({ modal: null, viewBooking: null, acct: { mode: mode, email: email, password: '', password2: '', busy: false, error: '', message: '' } });
+    }
+    acctSet(patch) { this.setState(function (s) { return { acct: Object.assign({}, s.acct, patch) }; }); }
+    closeAccount() { this.setState({ acct: null }); }
+    memberLogin() {
+      var a = this.state.acct;
+      if (!a.email.trim() || !a.password) return this.acctSet({ error: 'Enter your email and password.' });
+      this.acctSet({ busy: true, error: '' });
+      api('POST', '/api/account/login', { email: a.email.trim(), password: a.password }).then(function (d) {
+        this.setState({ member: d.member, acct: null });
+      }.bind(this)).catch(function (e) { this.acctSet({ busy: false, error: e.message }); }.bind(this));
+    }
+    requestLink() {
+      var a = this.state.acct;
+      if (!GENERIC_EMAIL_RE.test(a.email.trim())) return this.acctSet({ error: 'Enter the email you registered with.' });
+      this.acctSet({ busy: true, error: '' });
+      api('POST', '/api/account/request-link', { email: a.email.trim() }).then(function (d) {
+        this.acctSet({ busy: false, mode: 'sent', message: d.message });
+      }.bind(this)).catch(function (e) { this.acctSet({ busy: false, error: e.message }); }.bind(this));
+    }
+    openSetPassword(token) {
+      this.setState({ acct: { mode: 'setpw', token: token, password: '', password2: '', busy: true, error: '', message: '', info: null } });
+      api('GET', '/api/account/link/' + encodeURIComponent(token)).then(function (info) {
+        this.acctSet({ busy: false, info: info });
+      }.bind(this)).catch(function (e) { this.acctSet({ busy: false, mode: 'link', error: e.message, email: '' }); }.bind(this));
+    }
+    submitSetPassword() {
+      var a = this.state.acct;
+      if (a.password.length < 8) return this.acctSet({ error: 'Use at least 8 characters.' });
+      if (a.password !== a.password2) return this.acctSet({ error: 'The two passwords don’t match.' });
+      this.acctSet({ busy: true, error: '' });
+      api('POST', '/api/account/set-password', { token: a.token, password: a.password }).then(function (d) {
+        this.setState({ member: d.member, acct: { mode: 'me', welcome: true, email: d.member.email, busy: false, error: '', message: '' } });
+      }.bind(this)).catch(function (e) { this.acctSet({ busy: false, error: e.message }); }.bind(this));
+    }
+    memberLogout() {
+      api('POST', '/api/account/logout').catch(function () {});
+      this.setState({ member: null, acct: null });
+    }
+    renderAccount() {
+      var a = this.state.acct;
+      if (!a) return null;
+      var set = this.acctSet.bind(this);
+      var close = this.closeAccount.bind(this);
+      var emailInput = function (onEnter) {
+        return h('div', { className: 'urb-field' }, this.labelEl('Email'),
+          this.input({ type: 'email', autoComplete: 'username', autoFocus: true, value: a.email, placeholder: 'ab1234@bath.ac.uk', onChange: function (e) { set({ email: e.target.value, error: '' }); }, onKeyDown: function (e) { if (e.key === 'Enter') onEnter(); } }));
+      }.bind(this);
+      var title, body;
+      if (a.mode === 'login') {
+        title = 'Member login';
+        body = [
+          h('div', { key: 'i', className: 'urb-row-sub', style: { marginBottom: '12px' } }, 'Log in to change or cancel your own bookings. You don’t need an account to book.'),
+          h('div', { key: 'e' }, emailInput(this.memberLogin.bind(this))),
+          h('div', { key: 'p', className: 'urb-field' }, this.labelEl('Password'),
+            this.input({ type: 'password', autoComplete: 'current-password', value: a.password, onChange: function (e) { set({ password: e.target.value, error: '' }); }, onKeyDown: function (e) { if (e.key === 'Enter') this.memberLogin(); }.bind(this) })),
+          a.error ? h('div', { key: 'x', className: 'urb-error-box' }, a.error) : null,
+          h('div', { key: 'a', className: 'urb-actions' },
+            h('button', { className: this.btnClass('ghost', true), onClick: close }, 'Cancel'),
+            h('button', { className: this.btnClass('primary', true), disabled: a.busy, onClick: this.memberLogin.bind(this) }, a.busy ? 'Logging in…' : 'Log in')),
+          h('div', { key: 'l', className: 'urb-acct-links' },
+            h('button', { className: 'urb-link-btn', onClick: function () { set({ mode: 'link', error: '', fresh: true }); } }, 'First time? Create your account'),
+            h('button', { className: 'urb-link-btn', onClick: function () { set({ mode: 'link', error: '', fresh: false }); } }, 'Forgot password?'))
+        ];
+      } else if (a.mode === 'link') {
+        title = a.fresh === false ? 'Reset your password' : 'Create your account';
+        body = [
+          h('div', { key: 'i', className: 'urb-row-sub', style: { marginBottom: '12px' } },
+            a.fresh === false ? 'Enter your email and we’ll send you a link to choose a new password.'
+              : 'Already registered to book? Enter the same email and we’ll send a link to it so you can choose a password. No need to register again.'),
+          h('div', { key: 'e' }, emailInput(this.requestLink.bind(this))),
+          a.error ? h('div', { key: 'x', className: 'urb-error-box' }, a.error) : null,
+          h('div', { key: 'a', className: 'urb-actions' },
+            h('button', { className: this.btnClass('ghost', true), onClick: function () { set({ mode: 'login', error: '' }); } }, 'Back'),
+            h('button', { className: this.btnClass('primary', true), disabled: a.busy, onClick: this.requestLink.bind(this) }, a.busy ? 'Sending…' : 'Email me a link'))
+        ];
+      } else if (a.mode === 'sent') {
+        title = 'Check your email';
+        body = [
+          h('div', { key: 'i', style: { fontSize: '14px', lineHeight: 1.45, marginBottom: '14px' } }, a.message),
+          h('div', { key: 'a', className: 'urb-actions' }, h('button', { className: this.btnClass('primary', true), onClick: close }, 'OK'))
+        ];
+      } else if (a.mode === 'setpw') {
+        title = a.info && a.info.hasAccount ? 'Choose a new password' : 'Set up your account';
+        body = a.busy && !a.info ? [h('div', { key: 'l', className: 'urb-row-sub' }, 'Checking your link…')] : [
+          a.info ? h('div', { key: 'w', className: 'urb-row-sub', style: { marginBottom: '12px' } }, 'Hi ' + a.info.name + ' — choose a password for ' + a.info.email + '.') : null,
+          h('div', { key: 'p', className: 'urb-field' }, this.labelEl('New password (8+ characters)'),
+            this.input({ type: 'password', autoComplete: 'new-password', autoFocus: true, value: a.password, onChange: function (e) { set({ password: e.target.value, error: '' }); } })),
+          h('div', { key: 'p2', className: 'urb-field' }, this.labelEl('Type it again'),
+            this.input({ type: 'password', autoComplete: 'new-password', value: a.password2, onChange: function (e) { set({ password2: e.target.value, error: '' }); }, onKeyDown: function (e) { if (e.key === 'Enter') this.submitSetPassword(); }.bind(this) })),
+          a.error ? h('div', { key: 'x', className: 'urb-error-box' }, a.error) : null,
+          h('div', { key: 'a', className: 'urb-actions' },
+            h('button', { className: this.btnClass('ghost', true), onClick: close }, 'Cancel'),
+            h('button', { className: this.btnClass('primary', true), disabled: a.busy, onClick: this.submitSetPassword.bind(this) }, a.busy ? 'Saving…' : 'Save password'))
+        ];
+      } else {
+        var m = this.state.member;
+        title = a.welcome ? 'You’re all set' : 'Your account';
+        body = [
+          h('div', { key: 'i', style: { fontSize: '14px', lineHeight: 1.45, marginBottom: '14px' } },
+            a.welcome ? 'You’re logged in. Tap any of your bookings on the schedule to change or cancel it.' : 'Logged in as ',
+            a.welcome ? null : h('b', null, m ? m.name + ' (' + m.email + ')' : '')),
+          h('div', { key: 'a', className: 'urb-actions' },
+            a.welcome ? null : h('button', { className: this.btnClass('danger', true), onClick: this.memberLogout.bind(this) }, 'Log out'),
+            h('button', { className: this.btnClass('primary', true), onClick: close }, a.welcome ? 'Go to schedule' : 'Close')),
+          a.welcome ? null : h('div', { key: 'l', className: 'urb-acct-links' },
+            h('button', { className: 'urb-link-btn', onClick: function () { set({ mode: 'link', fresh: false, email: m ? m.email : '' }); } }, 'Change password'))
+        ];
+      }
+      return h('div', { className: 'urb-overlay urb-overlay-top urb-fade', onClick: close },
+        h('div', { className: 'urb-card urb-pop', onClick: function (e) { e.stopPropagation(); } },
+          h('div', { className: 'urb-card-head' }, h('span', null, '👤'), h('div', { className: 'urb-card-head-title' }, title)),
+          h('div', { className: 'urb-card-body' }, body)
         )
       );
     }
@@ -1517,19 +1815,25 @@
               h('div', { className: 'urb-brand-sub' }, 'Live radio & DJ studio reservations')
             ),
             h('div', { className: 'urb-spacer' }),
-            h('button', { className: 'btn btn-md' + (this.state.admin ? ' btn-primary' : ''), onClick: this.toggleAdmin.bind(this) }, this.state.admin ? '✓ Admin mode — exit' : '🔓 Admin sign-in')
+            h('div', { className: 'urb-header-actions' },
+              this.state.member
+                ? h('button', { className: 'btn btn-md', onClick: function () { this.openAccount('me'); }.bind(this) }, '👤 ' + this.state.member.name.split(' ')[0])
+                : h('button', { className: 'btn btn-md', onClick: function () { this.openAccount('login'); }.bind(this) }, '👤 Member login'),
+              h('button', { className: 'btn btn-md' + (this.state.admin ? ' btn-primary' : ''), onClick: this.toggleAdmin.bind(this) }, this.state.admin ? '✓ Admin — exit' : '🔓 Admin')
+            )
           ),
 
           h('div', { className: 'db-banner ' + (this.state.dbError ? 'error' : (!this.state.dbReady ? 'pending' : 'ok')) }, this.state.dbError || 'Connecting…'),
           this.state.adminNotice ? h('div', { className: 'db-banner error' }, this.state.adminNotice) : null,
 
           this.state.admin ? h('div', { className: 'urb-admin-nav' },
-            [['schedule', 'Schedule'], ['members', 'Members'], ['settings', 'Settings'], ['equipment', 'Equipment']].map(function (p) {
+            [['schedule', 'Schedule'], ['members', 'Members'], ['categories', 'Show types'], ['settings', 'Settings'], ['equipment', 'Equipment']].map(function (p) {
               return h('button', { key: p[0], className: 'btn btn-sm' + (page === p[0] ? ' btn-primary' : ''), onClick: function () { this.openPage(p[0]); }.bind(this) }, p[1]);
             }, this)
           ) : null,
 
           page === 'members' ? this.renderMembersPage() : null,
+          page === 'categories' ? this.renderCategoriesPage() : null,
           page === 'settings' ? this.renderSettingsPage() : null,
           page === 'equipment' ? this.renderEquipmentPage() : null,
 
@@ -1569,6 +1873,7 @@
         this.renderFullWeek(),
         this.renderModal(),
         this.renderCrop(),
+        this.renderAccount(),
         this.renderReauth(),
         this.renderEgg(),
         this.state.loadPhase === 'done' ? null : h('div', { className: 'urb-loader' + (this.state.loadPhase === 'out' ? ' out' : '') },

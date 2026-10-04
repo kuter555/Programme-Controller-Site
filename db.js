@@ -56,6 +56,23 @@ db.exec(`
     active INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
+  CREATE TABLE IF NOT EXISTS member_sessions (
+    token TEXT PRIMARY KEY,
+    member_id INTEGER NOT NULL,
+    expires INTEGER NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS member_tokens (
+    token_hash TEXT PRIMARY KEY,
+    member_id INTEGER NOT NULL,
+    expires INTEGER NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS categories (
+    key TEXT PRIMARY KEY,
+    label TEXT NOT NULL,
+    color TEXT NOT NULL,
+    hint TEXT NOT NULL DEFAULT '',
+    sort INTEGER NOT NULL DEFAULT 0
+  );
 `);
 
 // Migrate older databases created before these columns existed.
@@ -76,6 +93,31 @@ if (!existingCols.includes('category')) {
 const existingMemberCols = db.prepare("PRAGMA table_info(members)").all().map(c => c.name);
 // Existing members were trusted under the old no-approval flow, so grandfather them in as approved.
 if (!existingMemberCols.includes('approved')) db.exec("ALTER TABLE members ADD COLUMN approved INTEGER NOT NULL DEFAULT 1");
+// Optional member accounts (password set via an emailed link) and the admin-managed media membership flag.
+if (!existingMemberCols.includes('pw_hash')) {
+  db.exec("ALTER TABLE members ADD COLUMN pw_salt TEXT");
+  db.exec("ALTER TABLE members ADD COLUMN pw_hash TEXT");
+}
+if (!existingMemberCols.includes('media_member')) db.exec("ALTER TABLE members ADD COLUMN media_member INTEGER NOT NULL DEFAULT 0");
+
+// Show types are admin-editable; seed the starting set the first time.
+// 'other' is permanent: removed categories fall back to it.
+const DEFAULT_CATEGORIES = [
+  ['flagship', 'Flagship', '#f2b705', ''],
+  ['training', 'Training', '#3fbfcf', ''],
+  ['music', 'Entertainment / General Music', '#2f6fb0', ''],
+  ['talk', 'Talk', '#e84a8a', ''],
+  ['specialist', 'Specialist Music', '#7b4fc9', 'A show focused on one genre'],
+  ['news', 'Journalistic / News', '#c0392b', ''],
+  ['sports', 'Sports', '#2e9e4f', ''],
+  ['podcast', 'Podcast recording', '#1f8a70', ''],
+  ['events', 'Events', '#f07c2a', 'e.g. Varsity, IWD, interviews'],
+  ['other', 'Other', '#8a96a3', '']
+];
+if (db.prepare('SELECT COUNT(*) AS n FROM categories').get().n === 0) {
+  const ins = db.prepare('INSERT INTO categories (key, label, color, hint, sort) VALUES (?, ?, ?, ?, ?)');
+  DEFAULT_CATEGORIES.forEach((c, i) => ins.run(c[0], c[1], c[2], c[3], i));
+}
 
 /* ---------- password hashing (scrypt, no extra dependency) ---------- */
 function hashPassphrase(passphrase) {
@@ -195,7 +237,9 @@ function rowToBooking(r) {
     items: parseItems(r.items), category: r.category || null
   };
 }
-function rowToMember(r) { return { id: r.id, name: r.name, email: r.email, approved: !!r.approved, createdAt: r.created_at }; }
+function rowToMember(r) {
+  return { id: r.id, name: r.name, email: r.email, approved: !!r.approved, createdAt: r.created_at, hasAccount: !!r.pw_hash, mediaMember: !!r.media_member };
+}
 
 /* ---------- bookings ---------- */
 function listBookings() {
@@ -275,7 +319,108 @@ function approveMember(id) {
   db.prepare('UPDATE members SET approved = 1 WHERE id = ?').run(id);
   return rowToMember(db.prepare('SELECT * FROM members WHERE id = ?').get(id));
 }
-function deleteMember(id) { db.prepare('DELETE FROM members WHERE id = ?').run(id); }
+function deleteMember(id) {
+  db.transaction(() => {
+    db.prepare('DELETE FROM member_sessions WHERE member_id = ?').run(id);
+    db.prepare('DELETE FROM member_tokens WHERE member_id = ?').run(id);
+    db.prepare('DELETE FROM members WHERE id = ?').run(id);
+  })();
+}
+function getMember(id) {
+  const r = db.prepare('SELECT * FROM members WHERE id = ?').get(id);
+  return r ? rowToMember(r) : null;
+}
+function setMediaMember(id, value) {
+  db.prepare('UPDATE members SET media_member = ? WHERE id = ?').run(value ? 1 : 0, id);
+  return getMember(id);
+}
+
+/* ---------- member accounts ---------- */
+function setMemberPassword(id, password) {
+  const { salt, hash } = hashPassphrase(password);
+  db.prepare('UPDATE members SET pw_salt = ?, pw_hash = ? WHERE id = ?').run(salt, hash, id);
+}
+// Returns the member for a correct email + password, otherwise null.
+function checkMemberLogin(email, password) {
+  const r = db.prepare('SELECT * FROM members WHERE email = ? COLLATE NOCASE AND approved = 1').get(email);
+  if (!r || !r.pw_hash) return null;
+  return verifyPassphrase(password || '', r.pw_salt, r.pw_hash) ? rowToMember(r) : null;
+}
+function createMemberSession(token, memberId, expires) {
+  db.prepare('INSERT INTO member_sessions (token, member_id, expires) VALUES (?, ?, ?)').run(token, memberId, expires);
+}
+// The signed-in member for a session token, or null if missing/expired.
+function getMemberSession(token, now) {
+  const r = db.prepare('SELECT m.*, s.expires AS s_expires FROM member_sessions s JOIN members m ON m.id = s.member_id WHERE s.token = ?').get(token);
+  if (!r) return null;
+  if (r.s_expires < now || !r.approved) { db.prepare('DELETE FROM member_sessions WHERE token = ?').run(token); return null; }
+  return rowToMember(r);
+}
+function extendMemberSession(token, expires) { db.prepare('UPDATE member_sessions SET expires = ? WHERE token = ?').run(expires, token); }
+function deleteMemberSession(token) { db.prepare('DELETE FROM member_sessions WHERE token = ?').run(token); }
+function deleteMemberSessionsFor(memberId) { db.prepare('DELETE FROM member_sessions WHERE member_id = ?').run(memberId); }
+// One-time set/reset-password links. Only a hash of the token is stored.
+function sha256(s) { return crypto.createHash('sha256').update(s).digest('hex'); }
+function createMemberToken(memberId, ttlMs) {
+  const raw = crypto.randomBytes(32).toString('hex');
+  db.prepare('DELETE FROM member_tokens WHERE member_id = ?').run(memberId); // newest link wins
+  db.prepare('INSERT INTO member_tokens (token_hash, member_id, expires) VALUES (?, ?, ?)').run(sha256(raw), memberId, Date.now() + ttlMs);
+  return raw;
+}
+// The member id a still-valid link belongs to (without using it up).
+function peekMemberToken(raw) {
+  const r = db.prepare('SELECT * FROM member_tokens WHERE token_hash = ?').get(sha256(String(raw || '')));
+  return r && r.expires >= Date.now() ? r.member_id : null;
+}
+// Returns the member id if the link is valid, and burns it.
+function consumeMemberToken(raw) {
+  const h = sha256(String(raw || ''));
+  const r = db.prepare('SELECT * FROM member_tokens WHERE token_hash = ?').get(h);
+  if (!r) return null;
+  db.prepare('DELETE FROM member_tokens WHERE token_hash = ?').run(h);
+  return r.expires >= Date.now() ? r.member_id : null;
+}
+function purgeExpiredMemberAuth(now) {
+  db.prepare('DELETE FROM member_sessions WHERE expires < ?').run(now);
+  db.prepare('DELETE FROM member_tokens WHERE expires < ?').run(now);
+}
+
+/* ---------- show categories ---------- */
+function listCategories() { return db.prepare('SELECT key, label, color, hint FROM categories ORDER BY sort, label').all(); }
+function categoryExists(key) { return !!db.prepare('SELECT 1 FROM categories WHERE key = ?').get(key); }
+function addCategory(label, color, hint) {
+  const base = label.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 24) || 'type';
+  let key = base, n = 2;
+  while (categoryExists(key)) key = base + '-' + (n++);
+  const sort = db.prepare('SELECT COALESCE(MAX(sort), 0) + 1 AS s FROM categories').get().s;
+  db.prepare('INSERT INTO categories (key, label, color, hint, sort) VALUES (?, ?, ?, ?, ?)').run(key, label, color, hint || '', sort);
+  return listCategories().find(c => c.key === key);
+}
+function updateCategory(key, fields) {
+  const cur = db.prepare('SELECT * FROM categories WHERE key = ?').get(key);
+  if (!cur) return null;
+  db.prepare('UPDATE categories SET label = ?, color = ?, hint = ? WHERE key = ?').run(
+    fields.label != null ? fields.label : cur.label,
+    fields.color != null ? fields.color : cur.color,
+    fields.hint != null ? fields.hint : cur.hint, key);
+  return listCategories().find(c => c.key === key);
+}
+// Removing a show type moves its bookings to 'other'.
+function deleteCategory(key) {
+  db.transaction(() => {
+    db.prepare("UPDATE bookings SET category = 'other', is_podcast = 0 WHERE category = ?").run(key);
+    db.prepare('DELETE FROM categories WHERE key = ?').run(key);
+  })();
+}
+// Swap a category with its neighbour (dir -1 = up, +1 = down).
+function moveCategory(key, dir) {
+  const list = db.prepare('SELECT key FROM categories ORDER BY sort, label').all().map(r => r.key);
+  const i = list.indexOf(key), j = i + dir;
+  if (i < 0 || j < 0 || j >= list.length) return;
+  list[i] = list[j]; list[j] = key;
+  const upd = db.prepare('UPDATE categories SET sort = ? WHERE key = ?');
+  db.transaction(() => list.forEach((k, idx) => upd.run(idx, k)))();
+}
 
 module.exports = {
   ensureAdminPassphrase, checkAdminPassphrase,
@@ -283,5 +428,9 @@ module.exports = {
   getSettings, saveSettings,
   listEquipment, getEquipment, addEquipment, updateEquipment, deleteEquipment,
   listBookings, getBooking, upsertBooking, deleteBooking, setPendingCancel, djWeeklyMinutes, roadshowConflicts,
-  listApprovedMembers, listPendingMembers, findMemberByEmail, insertMember, approveMember, deleteMember
+  listApprovedMembers, listPendingMembers, findMemberByEmail, insertMember, approveMember, deleteMember,
+  getMember, setMediaMember,
+  setMemberPassword, checkMemberLogin, createMemberSession, getMemberSession, extendMemberSession,
+  deleteMemberSession, deleteMemberSessionsFor, createMemberToken, peekMemberToken, consumeMemberToken, purgeExpiredMemberAuth,
+  listCategories, categoryExists, addCategory, updateCategory, deleteCategory, moveCategory
 };
