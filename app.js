@@ -1317,37 +1317,47 @@
           h('button', { className: this.btnClass('danger'), onClick: function () { this.denyMember(m.id); }.bind(this) }, 'Deny')
         );
       }.bind(this);
+      // Sections with something waiting get the full treatment; empty ones
+      // collapse into one compact "nothing pending" strip.
+      var sections = [
+        ['Pending member registrations', 'Member registrations', pendingMembers, pendingMemberRow],
+        ['Pending weekly requests', 'Weekly requests', reqs, reqRow],
+        ['Pending DJ limit overrides', 'DJ limit overrides', overrides, overrideRow],
+        ['Pending cancellations', 'Cancellations', cancels, cancelRow]
+      ];
+      var full = sections.filter(function (sec) { return sec[2].length; });
+      var empty = sections.filter(function (sec) { return !sec[2].length; });
+
+      return h('div', { className: 'urb-admin-panel' },
+        h('div', { className: 'urb-admin-title' }, 'Admin'),
+        this.state.adminError ? h('div', { className: 'urb-error', style: { marginBottom: '10px' } }, this.state.adminError) : null,
+        full.map(function (sec) {
+          return h('div', { key: sec[0], className: 'urb-admin-section' },
+            h('div', { className: 'urb-row-title', style: { marginBottom: '8px' } }, sec[0] + ' (' + sec[2].length + ')'),
+            sec[2].map(sec[3])
+          );
+        }),
+        empty.length ? h('div', { className: 'urb-admin-empty' + (full.length ? '' : ' alone') },
+          h('span', { className: 'urb-admin-empty-label' }, full.length ? 'Nothing pending:' : '✓ Nothing pending'),
+          full.length ? empty.map(function (sec) { return h('span', { key: sec[0], className: 'urb-tag' }, sec[1]); }) : null
+        ) : null
+      );
+    }
+    renderMembersPage() {
       var memberRow = function (m) {
         return h('div', { key: m.id, className: 'urb-member-row' },
           h('div', { style: { flex: 1, minWidth: 0 } },
             h('div', { className: 'urb-row-title' }, m.name),
             h('div', { className: 'urb-row-sub' }, m.email)
           ),
-          h('button', { className: this.btnClass('danger'), onClick: function () { this.removeMember(m.id); }.bind(this) }, 'Cancel')
+          h('button', { className: this.btnClass('danger'), onClick: function () { this.removeMember(m.id); }.bind(this) }, 'Remove')
         );
       }.bind(this);
-
-      return h('div', { className: 'urb-admin-panel' },
-        h('div', { className: 'urb-admin-title' }, 'Admin'),
-        this.state.adminError ? h('div', { className: 'urb-error', style: { marginBottom: '10px' } }, this.state.adminError) : null,
+      return h('div', { className: 'urb-admin-panel urb-page-panel' },
+        h('div', { className: 'urb-admin-title' }, 'Registered members (' + this.state.members.length + ')'),
+        h('div', { className: 'urb-row-sub' }, 'New registrations wait under Admin on the Schedule tab until you approve them.'),
+        this.state.adminError ? h('div', { className: 'urb-error' }, this.state.adminError) : null,
         h('div', { className: 'urb-admin-section' },
-          h('div', { className: 'urb-row-title', style: { marginBottom: '8px' } }, 'Pending member registrations'),
-          pendingMembers.length ? pendingMembers.map(pendingMemberRow) : h('div', { className: 'urb-row-sub' }, 'None.')
-        ),
-        h('div', { className: 'urb-admin-section' },
-          h('div', { className: 'urb-row-title', style: { marginBottom: '8px' } }, 'Pending weekly requests'),
-          reqs.length ? reqs.map(reqRow) : h('div', { className: 'urb-row-sub' }, 'None.')
-        ),
-        h('div', { className: 'urb-admin-section' },
-          h('div', { className: 'urb-row-title', style: { marginBottom: '8px' } }, 'Pending DJ limit overrides'),
-          overrides.length ? overrides.map(overrideRow) : h('div', { className: 'urb-row-sub' }, 'None.')
-        ),
-        h('div', { className: 'urb-admin-section' },
-          h('div', { className: 'urb-row-title', style: { marginBottom: '8px' } }, 'Pending cancellations'),
-          cancels.length ? cancels.map(cancelRow) : h('div', { className: 'urb-row-sub' }, 'None.')
-        ),
-        h('div', { className: 'urb-admin-section' },
-          h('div', { className: 'urb-row-title', style: { marginBottom: '8px' } }, 'Registered members (' + this.state.members.length + ')'),
           this.state.members.length ? this.state.members.map(memberRow) : h('div', { className: 'urb-row-sub' }, 'No one has registered yet.')
         )
       );
@@ -1472,11 +1482,12 @@
           this.state.adminNotice ? h('div', { className: 'db-banner error' }, this.state.adminNotice) : null,
 
           this.state.admin ? h('div', { className: 'urb-admin-nav' },
-            [['schedule', 'Schedule'], ['settings', 'Settings'], ['equipment', 'Equipment']].map(function (p) {
+            [['schedule', 'Schedule'], ['members', 'Members'], ['settings', 'Settings'], ['equipment', 'Equipment']].map(function (p) {
               return h('button', { key: p[0], className: 'btn btn-sm' + (page === p[0] ? ' btn-primary' : ''), onClick: function () { this.openPage(p[0]); }.bind(this) }, p[1]);
             }, this)
           ) : null,
 
+          page === 'members' ? this.renderMembersPage() : null,
           page === 'settings' ? this.renderSettingsPage() : null,
           page === 'equipment' ? this.renderEquipmentPage() : null,
 
