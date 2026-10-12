@@ -391,3 +391,9 @@ input[type="date"].urb-input::-webkit-date-and-time-value{text-align:left;margin
   .urb-actions .btn-wide{flex:1 1 120px;}
   .urb-acct-links{flex-direction:column;align-items:flex-start;}
 }
+
+/* members CSV export */
+.urb-page-title-row{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:10px;}
+.urb-page-title-row .urb-admin-title{margin-bottom:0;}
+.urb-download{display:inline-flex;align-items:center;text-decoration:none;color:var(--text);}
+.urb-download:hover{color:var(--text);}

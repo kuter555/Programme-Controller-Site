@@ -1489,7 +1489,10 @@
         );
       }.bind(this);
       return h('div', { className: 'urb-admin-panel urb-page-panel' },
-        h('div', { className: 'urb-admin-title' }, 'Registered members'),
+        h('div', { className: 'urb-page-title-row' },
+          h('div', { className: 'urb-admin-title' }, 'Registered members'),
+          h('a', { className: 'btn btn-sm urb-download', href: '/api/admin/members.csv', download: '' }, '⬇ Download CSV')
+        ),
         h('div', { className: 'urb-stat-row' },
           h('div', { className: 'urb-stat' }, h('b', null, all.length), ' members'),
           h('div', { className: 'urb-stat urb-stat-media' }, h('b', null, media), ' with media membership'),

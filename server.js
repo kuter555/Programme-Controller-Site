@@ -442,6 +442,20 @@ app.post('/api/admin/bookings/:id/approve-override', requireAdmin, (req, res) =>
 app.post('/api/admin/bookings/:id/deny-override', requireAdmin, (req, res) => { db.deleteBooking(req.params.id); res.json({ ok: true }); });
 
 app.get('/api/admin/members', requireAdmin, (req, res) => res.json(db.listApprovedMembers()));
+// Spreadsheet export of approved members: name and username (the part before @).
+function csvCell(v) {
+  let s = String(v == null ? '' : v);
+  if (/^[=+\-@\t\r]/.test(s)) s = "'" + s; // stop spreadsheets treating it as a formula
+  return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+app.get('/api/admin/members.csv', requireAdmin, (req, res) => {
+  const rows = [['Name', 'Username']].concat(db.listApprovedMembers().map(m => [m.name, m.email.split('@')[0]]));
+  const day = new Date().toISOString().slice(0, 10);
+  res.set('Content-Type', 'text/csv; charset=utf-8');
+  res.set('Content-Disposition', 'attachment; filename="urb-members-' + day + '.csv"');
+  // BOM so Excel reads names with accents correctly.
+  res.send('﻿' + rows.map(r => r.map(csvCell).join(',')).join('\r\n') + '\r\n');
+});
 app.get('/api/admin/members/pending', requireAdmin, (req, res) => res.json(db.listPendingMembers()));
 app.post('/api/admin/members/:id/approve', requireAdmin, (req, res) => res.json(db.approveMember(+req.params.id)));
 app.put('/api/admin/members/:id/media', requireAdmin, (req, res) => {
