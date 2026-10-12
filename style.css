@@ -409,3 +409,8 @@ input[type="date"].urb-input::-webkit-date-and-time-value{text-align:left;margin
 .urb-change-icons{display:flex;align-items:center;gap:6px;flex-wrap:wrap;}
 .urb-change-icons img{width:34px;height:34px;border-radius:6px;object-fit:cover;border:1px solid var(--border);}
 .urb-change-note{font-style:italic;}
+/* change request: day / start / length */
+.urb-move{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;}
+.urb-move > div{min-width:0;}
+.urb-warn-box{font-size:12.5px;font-weight:600;color:#8a5a00;background:#fff4dc;border:1px solid #f0cf86;border-radius:9px;padding:9px 11px;margin-top:8px;line-height:1.4;}
+:root[data-theme="dark"] .urb-warn-box{color:#ffd27a;background:rgba(240,180,60,.12);border-color:#6b5420;}

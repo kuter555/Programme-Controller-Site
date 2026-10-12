@@ -556,13 +556,8 @@
       var f = this.state.form;
       if (!f.title.trim()) return this.setState({ formError: 'The show needs a name.' });
       if (f.endMin <= f.startMin) return this.setState({ formError: 'End time must be after start time.' });
-      if (this.slotChanged(f)) {
-        var clash = this.findClash(f);
-        if (clash) {
-          var cd = this.parse(clash.date);
-          return this.setState({ formError: 'That time overlaps “' + clash.booking.title + '” on ' + DAYS[(cd.getDay() + 6) % 7] + ' ' + cd.getDate() + '/' + (cd.getMonth() + 1) + ', ' + this.rangeLabel(clash.booking) + '. Pick another slot.' });
-        }
-      }
+      var clash = this.slotChanged(f) ? this.findClash(f) : null;
+      if (clash && !window.confirm('“' + clash.booking.title + '” is already in that slot. Send the request anyway? The admins will need to sort out the clash (e.g. if you’re swapping slots).')) return;
       this.setState({ saving: true, formError: '' });
       api('POST', '/api/bookings/' + encodeURIComponent(f.id) + '/request-change', {
         title: f.title.trim(), description: f.description.trim(), icon: f.icon || null,
@@ -578,6 +573,82 @@
       }.bind(this)).catch(function (e) {
         this.setState({ saving: false, formError: e.message || 'Could not send your request.' });
       }.bind(this));
+    }
+    // Weekday of a YYYY-MM-DD date, Monday = 0.
+    weekdayOf(ds) { return (this.parse(ds).getDay() + 6) % 7; }
+    // The date a move to weekday `wd` lands on. One-off shows move within their own
+    // week; weekly shows move from the next such day (never in the past), and earlier
+    // weeks keep the old slot.
+    moveDateFor(f, wd) {
+      var o = f.orig, today = dayNum(this.fmt(new Date()));
+      var toStr = function (dn) { return new Date(dn * 86400000).toISOString().slice(0, 10); };
+      if (o.repeat === 'weekly') {
+        var from = Math.max(dayNum(o.date), today);
+        var fromWd = (new Date(from * 86400000).getUTCDay() + 6) % 7;
+        return toStr(from + ((wd - fromWd + 7) % 7));
+      }
+      return toStr(dayNum(o.date) - this.weekdayOf(o.date) + wd);
+    }
+    // Change one of day / start / length; anything left as it was keeps the original slot.
+    setMove(patch) {
+      this.setState(function (st) {
+        var f = st.form, o = f.orig;
+        var wd = patch.wd != null ? patch.wd : this.weekdayOf(f.date);
+        var start = patch.start != null ? patch.start : f.startMin;
+        var dur = patch.dur != null ? patch.dur : f.endMin - f.startMin;
+        var unchanged = wd === this.weekdayOf(o.date) && start === o.startMin && dur === o.endMin - o.startMin;
+        var date = unchanged ? o.date : this.moveDateFor(f, wd);
+        return { form: Object.assign({}, f, { date: date, startMin: start, endMin: start + dur }), formError: '' };
+      }.bind(this));
+    }
+    renderMoveFields(f) {
+      var FULL_DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+      var s = this.state.settings, o = f.orig;
+      var radio = f.studio === 1;
+      var wd = this.weekdayOf(f.date), dur = f.endMin - f.startMin;
+      var starts = [], durs = [], m;
+      if (radio) {
+        for (m = 10; m < 1440; m += 60) starts.push(m);
+        for (m = 60; m <= s.radioMaxHours * 60; m += 60) durs.push(m);
+      } else {
+        for (m = 0; m < 1440; m += SNAP) starts.push(m);
+        for (m = s.djMinSlotMin; m <= s.djMaxSlotMin; m += SNAP) durs.push(m);
+      }
+      // Keep the show's current values selectable even if they're outside today's rules.
+      [f.startMin, o.startMin].forEach(function (x) { if (starts.indexOf(x) < 0) starts.push(x); });
+      [dur, o.endMin - o.startMin].forEach(function (x) { if (durs.indexOf(x) < 0) durs.push(x); });
+      starts.sort(function (a, b) { return a - b; });
+      durs.sort(function (a, b) { return a - b; });
+      var durLabel = function (x) {
+        var hrs = Math.floor(x / 60), mins = x % 60;
+        return (hrs ? hrs + ' hour' + (hrs > 1 ? 's' : '') : '') + (hrs && mins ? ' ' : '') + (mins ? mins + ' mins' : '');
+      };
+      var moved = this.slotChanged(f);
+      var d = this.parse(f.date), dl = DAYS[wd] + ' ' + d.getDate() + '/' + (d.getMonth() + 1);
+      var where = !moved ? 'Currently ' + (o.repeat === 'weekly' ? 'every ' + FULL_DAYS[this.weekdayOf(o.date)] : dl) + ', ' + this.minLabel(o.startMin) + '–' + this.minLabel(o.endMin) + '. Change any of these to request a new slot.'
+        : o.repeat === 'weekly' ? '↻ Every ' + FULL_DAYS[wd] + ' from ' + dl + ', ' + this.rangeLabel(f) + '. Earlier weeks stay as they are.'
+        : 'Moves to ' + dl + ', ' + this.rangeLabel(f) + '.';
+      var clash = moved ? this.findClash(f) : null;
+      var clashText = null;
+      if (clash) {
+        var cd = this.parse(clash.date);
+        clashText = '⚠ “' + clash.booking.title + '” is already in that slot (' + DAYS[(cd.getDay() + 6) % 7] + ' ' + cd.getDate() + '/' + (cd.getMonth() + 1) + ', ' + this.rangeLabel(clash.booking) + '). Pick another time, or say in the note if you’re swapping.';
+      }
+      var tooLate = f.endMin > 1440;
+      return h('div', { className: 'urb-field' },
+        this.labelEl('Time slot'),
+        h('div', { className: 'urb-move' },
+          h('div', null, this.labelEl('Day'), h('select', { className: 'urb-select', value: wd, onChange: function (e) { this.setMove({ wd: +e.target.value }); }.bind(this) },
+            DAYS.map(function (name, i) { return h('option', { key: i, value: i }, name); }))),
+          h('div', null, this.labelEl('Start'), h('select', { className: 'urb-select', value: f.startMin, onChange: function (e) { this.setMove({ start: +e.target.value }); }.bind(this) },
+            starts.map(function (x) { return h('option', { key: x, value: x }, this.minLabel(x)); }, this))),
+          h('div', null, this.labelEl('Length'), h('select', { className: 'urb-select', value: dur, onChange: function (e) { this.setMove({ dur: +e.target.value }); }.bind(this) },
+            durs.map(function (x) { return h('option', { key: x, value: x }, durLabel(x)); })))
+        ),
+        h('div', { className: 'urb-row-sub', style: { marginTop: '6px' } }, where),
+        tooLate ? h('div', { className: 'urb-warn-box' }, '⚠ That would run past midnight — pick an earlier start or a shorter length.') : null,
+        clashText ? h('div', { className: 'urb-warn-box' }, clashText) : null
+      );
     }
     renderChangeModal() {
       var f = this.state.form;
@@ -595,11 +666,7 @@
             h('div', { className: 'urb-field' }, this.labelEl('Show name'), this.input({ value: f.title, onChange: function (e) { this.setField('title', e.target.value); }.bind(this) })),
             this.renderIconField(f),
             h('div', { className: 'urb-field' }, this.labelEl('Description'), h('textarea', { className: 'urb-textarea', value: f.description, rows: 3, placeholder: 'What’s the show about?', onChange: function (e) { this.setField('description', e.target.value); }.bind(this) })),
-            h('div', { className: 'urb-field' },
-              this.labelEl('Time'),
-              f.repeat === 'weekly' ? h('div', { className: 'urb-row-sub', style: { marginBottom: '8px' } }, '↻ This is a weekly slot. To move it, set the start date to the first week it should move — earlier weeks stay as they are.') : null,
-              this.renderRangeFields(f)
-            ),
+            this.renderMoveFields(f),
             h('div', { className: 'urb-field' }, this.labelEl('Note for the admins (optional)'), h('textarea', { className: 'urb-textarea', value: f.note, rows: 2, maxLength: 300, placeholder: 'e.g. who you are, or why the change', onChange: function (e) { this.setField('note', e.target.value); }.bind(this) })),
             this.state.formError ? h('div', { className: 'urb-error-box' }, this.state.formError) : null,
             h('div', { className: 'urb-actions' },
