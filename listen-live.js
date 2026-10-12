@@ -44,35 +44,39 @@
   }
 
   var CSS = [
-    ':host{all:initial;display:block;}',
-    '.card{--navy:#01326c;--ink:#01326c;--dim:#4f6e94;--bg:#ffffff;--line:#c9defb;--accent:#0a63c9;--chip:#eef6ff;',
-    '  display:flex;align-items:stretch;gap:0;max-width:520px;background:var(--bg);border:1px solid var(--line);border-radius:14px;overflow:hidden;',
-    "  font-family:'URB Futura','Futura','Futura PT',Helvetica,Arial,sans-serif;color:var(--ink);box-shadow:0 2px 10px rgba(1,50,108,.08);cursor:pointer;",
+    /* Fill whatever box the host gives us: full width, and full height if it has one. */
+    ':host{all:initial;display:block;width:100%;height:100%;}',
+    '.card{--brand:#542f7b;--ink:#542f7b;--dim:#6f5a88;--bg:#ffffff;--line:#d9cdea;--accent:#7b4fb0;--chip:#f3eef9;--art-bg:#ffffff;',
+    '  display:flex;align-items:stretch;box-sizing:border-box;width:100%;height:100%;min-height:96px;',
+    '  background:var(--bg);border:1px solid var(--line);border-radius:0;overflow:hidden;container-type:inline-size;',
+    "  font-family:'URB Futura','Futura','Futura PT',Helvetica,Arial,sans-serif;color:var(--ink);box-shadow:0 2px 10px rgba(84,47,123,.10);cursor:pointer;",
     '  -webkit-tap-highlight-color:transparent;user-select:none;}',
-    '.card.dark{--ink:#dceaff;--dim:#93aecb;--bg:#101b2c;--line:#28405f;--accent:#5fa3ef;--chip:#16233a;box-shadow:0 2px 10px rgba(0,0,0,.4);}',
+    '.card.dark{--ink:#efe6fa;--dim:#b9a6cf;--bg:#1d1029;--line:#3d2758;--accent:#b894e0;--chip:#2d1b40;--art-bg:#2a1840;box-shadow:0 2px 10px rgba(0,0,0,.4);}',
     '.card:focus-visible{outline:3px solid var(--accent);outline-offset:2px;}',
-    /* square artwork on the left, doubling as the play button */
-    '.art{position:relative;flex:none;width:96px;height:96px;background:#0b2f5e;}',
-    '.art img{display:block;width:100%;height:100%;object-fit:cover;}',
-    '.art img.logo{object-fit:contain;padding:10px;box-sizing:border-box;background:#fff;}',
-    '.card.dark .art img.logo{background:#0b2f5e;}',
+    /* square artwork on the left: as tall as the player, always square */
+    '.art{position:relative;flex:none;align-self:stretch;width:96px;background:var(--art-bg);border-right:1px solid var(--line);}',
+    '.art img{position:absolute;inset:0;display:block;width:100%;height:100%;object-fit:cover;}',
+    '.art img.logo{object-fit:contain;padding:6%;box-sizing:border-box;}',
     /* play/pause sits in the corner so the artwork stays visible */
     '.play{position:absolute;inset:0;display:flex;align-items:flex-end;justify-content:flex-end;padding:6px;transition:background .15s;}',
-    '.card:hover .play{background:rgba(1,20,50,.12);}',
-    '.btn{width:34px;height:34px;border-radius:50%;background:#01326c;display:flex;align-items:center;justify-content:center;box-shadow:0 2px 6px rgba(0,0,0,.35);transition:transform .12s;}',
+    '.card:hover .play{background:rgba(84,47,123,.10);}',
+    '.btn{width:34px;height:34px;border-radius:0;background:var(--brand);display:flex;align-items:center;justify-content:center;box-shadow:0 2px 6px rgba(0,0,0,.3);transition:transform .12s;}',
+    '.card.dark .btn{background:#7b4fb0;}',
     '.card:hover .btn{transform:scale(1.08);}',
     '.btn svg{width:16px;height:16px;fill:#fff;}',
     '.spin{width:14px;height:14px;border:3px solid rgba(255,255,255,.35);border-top-color:#fff;border-radius:50%;animation:spin .8s linear infinite;}',
     '@keyframes spin{to{transform:rotate(360deg);}}',
-    /* text */
-    '.info{flex:1;min-width:0;padding:10px 14px;display:flex;flex-direction:column;justify-content:center;gap:3px;}',
-    '.badge{display:inline-flex;align-items:center;gap:6px;align-self:flex-start;font-size:10.5px;font-weight:800;letter-spacing:.09em;text-transform:uppercase;color:#fff;background:#d62d3a;padding:3px 8px 2px;border-radius:999px;}',
-    '.badge.off{background:var(--chip);color:var(--dim);}',
+    /* text — grows a little with the width of the container */
+    '.info{flex:1;min-width:0;padding:10px 16px;display:flex;flex-direction:column;justify-content:center;gap:4px;}',
+    '.badge{display:inline-flex;align-items:center;gap:6px;align-self:flex-start;font-size:clamp(10.5px,1.6cqw,13px);font-weight:800;letter-spacing:.09em;text-transform:uppercase;color:#fff;background:var(--brand);padding:3px 8px 2px;border-radius:0;}',
+    '.card.dark .badge{background:#7b4fb0;}',
+    '.badge.off{background:var(--chip) !important;color:var(--dim);}',
     '.dot{width:6px;height:6px;border-radius:50%;background:#fff;animation:pulse 1.6s ease-in-out infinite;}',
     '@keyframes pulse{0%,100%{opacity:1;}50%{opacity:.3;}}',
-    '.title{font-size:16px;font-weight:800;line-height:1.2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}',
-    '.sub{font-size:12.5px;font-weight:500;color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}',
+    '.title{font-size:clamp(16px,3.4cqw,28px);font-weight:800;line-height:1.2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}',
+    '.sub{font-size:clamp(12.5px,2.1cqw,17px);font-weight:500;color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}',
     '.err{color:#c0392b;}',
+    '.card.dark .err{color:#ff8a80;}',
     /* equaliser shown while playing */
     '.eq{display:none;align-items:flex-end;gap:2px;height:14px;margin-left:4px;}',
     '.card.playing .eq{display:inline-flex;}',
@@ -80,7 +84,7 @@
     '.eq i:nth-child(2){animation-delay:-.4s;}.eq i:nth-child(3){animation-delay:-.7s;}',
     '@keyframes eq{0%,100%{height:3px;}50%{height:14px;}}',
     '@media (prefers-reduced-motion:reduce){.dot,.eq i,.spin{animation:none;}}',
-    '@media (max-width:360px){.art{width:80px;height:80px;}.title{font-size:15px;}}'
+    '@container (max-width:340px){.card{min-height:80px;}.info{padding:8px 12px;}}'
   ].join('\n');
 
   var ICON_PLAY = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l11-6.5z"/></svg>';
@@ -110,7 +114,7 @@
     var art = el('div', 'art', card);
     var img = el('img', 'logo', art);
     img.alt = '';
-    img.src = abs('/assets/logo.png');
+    img.src = abs('/assets/listen-logo.png');
     var overlay = el('div', 'play', art);
     var btn = el('div', 'btn', overlay);
 
@@ -134,8 +138,9 @@
 
     function render() {
       var live = now.live;
+      var labelTitle = live ? live.title : 'Automation Playlist';
       // Square on the left: the show's own icon if it has one, otherwise the URB logo.
-      var art = live && live.image ? abs(live.image) : abs('/assets/logo.png');
+      var art = live && live.image ? abs(live.image) : abs('/assets/listen-logo.png');
       if (img.getAttribute('src') !== art) {
         img.src = art;
         img.className = live && live.image ? '' : 'logo';
@@ -145,8 +150,9 @@
         title.textContent = live.title;
         sub.textContent = 'with ' + live.presenter + ' · ' + live.start + '–' + live.end;
       } else {
-        title.textContent = 'URB 1449 AM';
-        sub.textContent = now.next ? 'Up next: ' + now.next.title + ' at ' + now.next.start : 'University Radio Bath';
+        // Nothing booked in Studio One: the automated playlist is on air.
+        title.textContent = 'Automation Playlist';
+        sub.textContent = 'Curated by our URB DJs';
       }
       if (state === 'error') {
         sub.textContent = 'Stream unavailable — tap to try again';
@@ -156,7 +162,7 @@
       }
       card.className = 'card' + (theme === 'dark' ? ' dark' : '') + (state === 'playing' ? ' playing' : '');
       btn.innerHTML = state === 'loading' ? '<div class="spin"></div>' : state === 'playing' ? ICON_PAUSE : ICON_PLAY;
-      var label = (state === 'playing' ? 'Pause URB live' : 'Play URB live') + (live ? ': ' + live.title : '');
+      var label = (state === 'playing' ? 'Pause URB live' : 'Play URB live') + ': ' + labelTitle;
       card.setAttribute('aria-label', label);
       card.title = label;
       updateMediaSession();
@@ -168,10 +174,10 @@
       var live = now.live;
       try {
         navigator.mediaSession.metadata = new MediaMetadata({
-          title: live ? live.title : 'URB 1449 AM',
-          artist: live ? live.presenter : 'University Radio Bath',
+          title: live ? live.title : 'Automation Playlist',
+          artist: live ? live.presenter : 'Curated by our URB DJs',
           album: 'URB live',
-          artwork: [{ src: live && live.image ? abs(live.image) : abs('/assets/logo.png'), sizes: '512x512' }]
+          artwork: [{ src: live && live.image ? abs(live.image) : abs('/assets/listen-logo.png'), sizes: '512x512' }]
         });
       } catch (e) {}
     }
@@ -224,7 +230,14 @@
       } catch (e) {}
     }
 
+    // Keep the artwork exactly square: as wide as the player is tall, whatever
+    // size the host container makes it.
+    function fitArt() { var ht = card.clientHeight; if (ht) art.style.width = ht + 'px'; }
+    if (window.ResizeObserver) new ResizeObserver(fitArt).observe(card);
+    else window.addEventListener('resize', fitArt);
+
     render();
+    fitArt();
     refresh();
     setInterval(function () { if (!document.hidden) refresh(); }, REFRESH_MS);
     document.addEventListener('visibilitychange', function () { if (!document.hidden) refresh(); });

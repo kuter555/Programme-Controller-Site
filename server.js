@@ -184,7 +184,7 @@ app.get('/api/now', (req, res) => {
   const next = list.find(i => i.start > t && i.start - t <= 24 * 60);
   res.set('Cache-Control', 'public, max-age=30');
   // Public: no presenter emails. Image paths are relative to this site; the widget resolves them.
-  res.json({ live: live ? showInfo(live) : null, next: next ? showInfo(next) : null, logo: '/assets/logo.png' });
+  res.json({ live: live ? showInfo(live) : null, next: next ? showInfo(next) : null, logo: '/assets/listen-logo.png' });
 });
 
 /* ---------- public read endpoints ---------- */
