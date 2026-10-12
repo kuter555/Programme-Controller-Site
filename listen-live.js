@@ -81,10 +81,21 @@
     /* equaliser shown while playing */
     '.eq{display:none;align-items:flex-end;gap:2px;height:14px;margin-left:4px;}',
     '.card.playing .eq{display:inline-flex;}',
-    '.eq i{display:block;width:3px;background:currentColor;animation:eq 1s ease-in-out infinite;}',
-    '.eq i:nth-child(2){animation-delay:-.4s;}.eq i:nth-child(3){animation-delay:-.7s;}',
-    '@keyframes eq{0%,100%{height:3px;}50%{height:14px;}}',
-    '@media (prefers-reduced-motion:reduce){.dot,.eq i,.spin{animation:none;}}',
+    /* Static bars by default (phones, tablets, Safari, reduced motion): each bar has its own
+       height, so they show even where the animation doesn't run. */
+    '.eq i{display:block;width:3px;height:9px;background:currentColor;transform-origin:50% 100%;}',
+    '.eq i:nth-child(2){height:14px;}.eq i:nth-child(3){height:6px;}',
+    /* Desktop with a mouse: animate, scaling full-height bars rather than animating height. */
+    '@media (hover:hover) and (pointer:fine){',
+    '  .eq i,.eq i:nth-child(2),.eq i:nth-child(3){height:14px;-webkit-animation:eq 1s ease-in-out infinite;animation:eq 1s ease-in-out infinite;}',
+    '  .eq i:nth-child(2){-webkit-animation-delay:-.4s;animation-delay:-.4s;}.eq i:nth-child(3){-webkit-animation-delay:-.7s;animation-delay:-.7s;}',
+    '}',
+    '@-webkit-keyframes eq{0%,100%{-webkit-transform:scaleY(.22);transform:scaleY(.22);}50%{-webkit-transform:scaleY(1);transform:scaleY(1);}}',
+    '@keyframes eq{0%,100%{transform:scaleY(.22);}50%{transform:scaleY(1);}}',
+    '@media (prefers-reduced-motion:reduce){',
+    '  .dot,.spin,.eq i,.eq i:nth-child(2),.eq i:nth-child(3){-webkit-animation:none;animation:none;}',
+    '  .eq i{height:9px;}.eq i:nth-child(2){height:14px;}.eq i:nth-child(3){height:6px;}',
+    '}',
     '@container (max-width:340px){.card{min-height:80px;}.info{padding:8px 12px;}}'
   ].join('\n');
 
