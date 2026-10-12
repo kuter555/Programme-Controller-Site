@@ -23,13 +23,16 @@
     if (!key) return null;
     return CATEGORIES.find(function (c) { return c.key === key; }) || CATEGORIES.find(function (c) { return c.key === 'other'; }) || null;
   }
-  // One app, three addresses:
-  //   /       public, view-only schedule — clean enough to embed in an iframe
-  //   /book   booking page for media members (not linked publicly)
-  //   /admin  admin
-  var MODE = (function () {
-    var path = window.location.pathname.replace(/\/+$/, '');
-    return path === '/admin' ? 'admin' : path === '/book' ? 'book' : 'view';
+  // One app, two addresses:
+  //   /      public, view-only schedule — no admin at all, clean enough to embed.
+  //          /?studio=1 or /?studio=2 shows just that studio (no tabs).
+  //   /book  the full site: booking for media members, plus admin sign-in.
+  var MODE = window.location.pathname.replace(/\/+$/, '') === '/book' ? 'book' : 'view';
+  var LOCKED_STUDIO = (function () {
+    if (MODE !== 'view') return null;
+    var s = null;
+    try { s = Number(new URLSearchParams(window.location.search).get('studio')); } catch (e) {}
+    return s === 1 || s === 2 ? s : null;
   })();
   var STUDIO_NAMES = { 1: 'Studio One', 2: 'Studio Two', 3: 'Roadshow' };
   var DEFAULT_SETTINGS = {
@@ -73,7 +76,7 @@
       try { forcedTheme = new URLSearchParams(window.location.search).get('theme'); } catch (e) {}
       if (forcedTheme === 'light' || forcedTheme === 'dark') { prefersDark = forcedTheme === 'dark'; this._manualTheme = true; }
       this.state = {
-        studio: 1, weekStart: null, bookings: [], members: [], pendingMembers: [], adminMembers: [], categories: [],
+        studio: LOCKED_STUDIO || 1, weekStart: null, bookings: [], members: [], pendingMembers: [], adminMembers: [], categories: [],
         memberFilter: 'all', catDrafts: {}, catMsg: '', newCat: { label: '', color: '#6c7a89', hint: '' },
         settings: Object.assign({}, DEFAULT_SETTINGS), equipment: [],
         admin: false, adminError: '', adminNotice: '', page: 'schedule',
@@ -100,7 +103,10 @@
     dbFetchBookings() { return api('GET', '/api/bookings'); }
     dbFetchMembers() { return api('GET', '/api/members'); }
     dbFetchPendingMembers() { return api('GET', '/api/admin/members/pending').catch(function () { return []; }); }
-    dbCheckAdminSession() { return api('GET', '/api/admin/session').then(function (d) { return !!d.admin; }); }
+    dbCheckAdminSession() {
+      if (MODE === 'view') return Promise.resolve(false); // the public page never shows admin
+      return api('GET', '/api/admin/session').then(function (d) { return !!d.admin; });
+    }
     dbFetchSettings() { return api('GET', '/api/settings'); }
     dbFetchEquipment() { return api('GET', '/api/equipment'); }
     dbFetchCategories() { return api('GET', '/api/categories'); }
@@ -154,8 +160,6 @@
           CATEGORIES = res[6];
           this.setState({ bookings: res[0], members: res[1], admin: res[2], pendingMembers: res[3], settings: res[4], equipment: res[5], categories: res[6], dbReady: true });
           if (res[2]) this.refreshPendingMembers();
-          // Arriving at /admin signed out: go straight to the passphrase prompt.
-          if (MODE === 'admin' && !res[2] && !this.state.modal) this.setState({ modal: 'login', loginError: '', loginPass: '' });
           this.finishLoading();
           this.startPolling();
         }.bind(this)).catch(function (e) {
@@ -1683,7 +1687,7 @@
       var tabs = [[1, 'STUDIO ONE', 'Live Radio'], [2, 'STUDIO TWO', 'DJ Studio']];
       if (MODE !== 'view') tabs.push([3, 'ROADSHOW', 'Equipment']);
       return h('div', null,
-        h('div', { className: 'urb-tabs' },
+        LOCKED_STUDIO ? null : h('div', { className: 'urb-tabs' },
           tabs.map(function (t) {
             return h('button', { key: t[0], className: 'urb-tab' + (studio === t[0] ? ' active' : ''), onClick: function () { this.setState({ studio: t[0] }); }.bind(this) },
               h('span', { className: 'urb-tab-title' }, t[1]), h('span', { className: 'urb-tab-sub' }, t[2]));
@@ -1713,7 +1717,7 @@
       );
     }
     render() {
-      var studio = MODE === 'view' && this.state.studio === 3 ? 1 : this.state.studio;
+      var studio = LOCKED_STUDIO || (MODE === 'view' && this.state.studio === 3 ? 1 : this.state.studio);
       var idleAnim = this.state.idle && this.state.loadPhase === 'done';
       var page = this.state.admin ? this.state.page : 'schedule';
       var overlays = [
@@ -1723,7 +1727,7 @@
 
       // Public, embeddable schedule: just the timetable — no header, buttons or footer.
       if (MODE === 'view') {
-        return h('div', { className: 'urb-page urb-mode-view' },
+        return h('div', { className: 'urb-page urb-mode-view' + (LOCKED_STUDIO ? ' urb-single' : '') },
           h('div', { className: 'urb-wrap' },
             this.state.dbError ? h('div', { className: 'db-banner error' }, this.state.dbError) : null,
             this.renderSchedule(studio)
@@ -1742,13 +1746,13 @@
           h('div', { className: 'urb-header' },
             h('img', { className: 'urb-logo' + (idleAnim ? ' idle' : ''), src: '/assets/logo.png', alt: 'URB 1449 AM', title: 'URB 1449 AM', onClick: this.openEgg.bind(this) }),
             h('div', null,
-              h('div', { className: 'urb-brand-title' }, MODE === 'admin' ? 'URB Studio Booking — Admin' : 'URB Studio Booking'),
-              h('div', { className: 'urb-brand-sub' }, MODE === 'admin' ? 'Manage bookings, members and settings' : 'Book the studios — media members only')
+              h('div', { className: 'urb-brand-title' }, 'URB Studio Booking'),
+              h('div', { className: 'urb-brand-sub' }, 'Live radio & DJ studio reservations')
             ),
             h('div', { className: 'urb-spacer' }),
-            MODE === 'admin' ? h('div', { className: 'urb-header-actions' },
-              h('button', { className: 'btn btn-md' + (this.state.admin ? ' btn-primary' : ''), onClick: this.toggleAdmin.bind(this) }, this.state.admin ? '✓ Admin — sign out' : '🔓 Admin sign-in')
-            ) : null
+            h('div', { className: 'urb-header-actions' },
+              h('button', { className: 'btn btn-md' + (this.state.admin ? ' btn-primary' : ''), onClick: this.toggleAdmin.bind(this) }, this.state.admin ? '✓ Admin mode — exit' : '🔓 Admin sign-in')
+            )
           ),
 
           h('div', { className: 'db-banner ' + (this.state.dbError ? 'error' : (!this.state.dbReady ? 'pending' : 'ok')) }, this.state.dbError || 'Connecting…'),

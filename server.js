@@ -72,9 +72,9 @@ app.use(cookieParser());
 app.use('/uploads', express.static(uploadsDir));
 app.use('/data', (req, res) => res.status(404).end()); // never serve the database folder
 app.use(express.static(__dirname, { index: 'index.html', dotfiles: 'deny' }));
-// The same single-page app serves all three addresses; it reads the path to decide
-// what to show: / = public view-only schedule (embeddable), /book = booking, /admin = admin.
-app.get(['/book', '/admin'], (req, res) => res.sendFile(path.join(__dirname, 'index.html')));
+// The same single-page app serves both addresses; it reads the path to decide what to
+// show: / = public view-only schedule (embeddable), /book = the full site incl. admin.
+app.get('/book', (req, res) => res.sendFile(path.join(__dirname, 'index.html')));
 
 /* ---------- date helpers (mirrors the Monday-start week logic in app.js) ---------- */
 function parseDate(s) { const p = s.split('-').map(Number); return new Date(p[0], p[1] - 1, p[2]); }
