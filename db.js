@@ -56,16 +56,6 @@ db.exec(`
     active INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
-  CREATE TABLE IF NOT EXISTS member_sessions (
-    token TEXT PRIMARY KEY,
-    member_id INTEGER NOT NULL,
-    expires INTEGER NOT NULL
-  );
-  CREATE TABLE IF NOT EXISTS member_tokens (
-    token_hash TEXT PRIMARY KEY,
-    member_id INTEGER NOT NULL,
-    expires INTEGER NOT NULL
-  );
   CREATE TABLE IF NOT EXISTS categories (
     key TEXT PRIMARY KEY,
     label TEXT NOT NULL,
@@ -93,11 +83,10 @@ if (!existingCols.includes('category')) {
 const existingMemberCols = db.prepare("PRAGMA table_info(members)").all().map(c => c.name);
 // Existing members were trusted under the old no-approval flow, so grandfather them in as approved.
 if (!existingMemberCols.includes('approved')) db.exec("ALTER TABLE members ADD COLUMN approved INTEGER NOT NULL DEFAULT 1");
-// Optional member accounts (password set via an emailed link) and the admin-managed media membership flag.
-if (!existingMemberCols.includes('pw_hash')) {
-  db.exec("ALTER TABLE members ADD COLUMN pw_salt TEXT");
-  db.exec("ALTER TABLE members ADD COLUMN pw_hash TEXT");
-}
+// Member logins were tried and withdrawn: clear any stored passwords and sessions.
+if (existingMemberCols.includes('pw_hash')) db.exec("UPDATE members SET pw_salt = NULL, pw_hash = NULL WHERE pw_hash IS NOT NULL");
+db.exec("DROP TABLE IF EXISTS member_sessions; DROP TABLE IF EXISTS member_tokens;");
+// Only members with media membership (switched on by an admin) can book.
 if (!existingMemberCols.includes('media_member')) db.exec("ALTER TABLE members ADD COLUMN media_member INTEGER NOT NULL DEFAULT 0");
 
 // Show types are admin-editable; seed the starting set the first time.
@@ -238,7 +227,7 @@ function rowToBooking(r) {
   };
 }
 function rowToMember(r) {
-  return { id: r.id, name: r.name, email: r.email, approved: !!r.approved, createdAt: r.created_at, hasAccount: !!r.pw_hash, mediaMember: !!r.media_member };
+  return { id: r.id, name: r.name, email: r.email, approved: !!r.approved, createdAt: r.created_at, mediaMember: !!r.media_member };
 }
 
 /* ---------- bookings ---------- */
@@ -319,13 +308,7 @@ function approveMember(id) {
   db.prepare('UPDATE members SET approved = 1 WHERE id = ?').run(id);
   return rowToMember(db.prepare('SELECT * FROM members WHERE id = ?').get(id));
 }
-function deleteMember(id) {
-  db.transaction(() => {
-    db.prepare('DELETE FROM member_sessions WHERE member_id = ?').run(id);
-    db.prepare('DELETE FROM member_tokens WHERE member_id = ?').run(id);
-    db.prepare('DELETE FROM members WHERE id = ?').run(id);
-  })();
-}
+function deleteMember(id) { db.prepare('DELETE FROM members WHERE id = ?').run(id); }
 function getMember(id) {
   const r = db.prepare('SELECT * FROM members WHERE id = ?').get(id);
   return r ? rowToMember(r) : null;
@@ -333,56 +316,6 @@ function getMember(id) {
 function setMediaMember(id, value) {
   db.prepare('UPDATE members SET media_member = ? WHERE id = ?').run(value ? 1 : 0, id);
   return getMember(id);
-}
-
-/* ---------- member accounts ---------- */
-function setMemberPassword(id, password) {
-  const { salt, hash } = hashPassphrase(password);
-  db.prepare('UPDATE members SET pw_salt = ?, pw_hash = ? WHERE id = ?').run(salt, hash, id);
-}
-// Returns the member for a correct email + password, otherwise null.
-function checkMemberLogin(email, password) {
-  const r = db.prepare('SELECT * FROM members WHERE email = ? COLLATE NOCASE AND approved = 1').get(email);
-  if (!r || !r.pw_hash) return null;
-  return verifyPassphrase(password || '', r.pw_salt, r.pw_hash) ? rowToMember(r) : null;
-}
-function createMemberSession(token, memberId, expires) {
-  db.prepare('INSERT INTO member_sessions (token, member_id, expires) VALUES (?, ?, ?)').run(token, memberId, expires);
-}
-// The signed-in member for a session token, or null if missing/expired.
-function getMemberSession(token, now) {
-  const r = db.prepare('SELECT m.*, s.expires AS s_expires FROM member_sessions s JOIN members m ON m.id = s.member_id WHERE s.token = ?').get(token);
-  if (!r) return null;
-  if (r.s_expires < now || !r.approved) { db.prepare('DELETE FROM member_sessions WHERE token = ?').run(token); return null; }
-  return rowToMember(r);
-}
-function extendMemberSession(token, expires) { db.prepare('UPDATE member_sessions SET expires = ? WHERE token = ?').run(expires, token); }
-function deleteMemberSession(token) { db.prepare('DELETE FROM member_sessions WHERE token = ?').run(token); }
-function deleteMemberSessionsFor(memberId) { db.prepare('DELETE FROM member_sessions WHERE member_id = ?').run(memberId); }
-// One-time set/reset-password links. Only a hash of the token is stored.
-function sha256(s) { return crypto.createHash('sha256').update(s).digest('hex'); }
-function createMemberToken(memberId, ttlMs) {
-  const raw = crypto.randomBytes(32).toString('hex');
-  db.prepare('DELETE FROM member_tokens WHERE member_id = ?').run(memberId); // newest link wins
-  db.prepare('INSERT INTO member_tokens (token_hash, member_id, expires) VALUES (?, ?, ?)').run(sha256(raw), memberId, Date.now() + ttlMs);
-  return raw;
-}
-// The member id a still-valid link belongs to (without using it up).
-function peekMemberToken(raw) {
-  const r = db.prepare('SELECT * FROM member_tokens WHERE token_hash = ?').get(sha256(String(raw || '')));
-  return r && r.expires >= Date.now() ? r.member_id : null;
-}
-// Returns the member id if the link is valid, and burns it.
-function consumeMemberToken(raw) {
-  const h = sha256(String(raw || ''));
-  const r = db.prepare('SELECT * FROM member_tokens WHERE token_hash = ?').get(h);
-  if (!r) return null;
-  db.prepare('DELETE FROM member_tokens WHERE token_hash = ?').run(h);
-  return r.expires >= Date.now() ? r.member_id : null;
-}
-function purgeExpiredMemberAuth(now) {
-  db.prepare('DELETE FROM member_sessions WHERE expires < ?').run(now);
-  db.prepare('DELETE FROM member_tokens WHERE expires < ?').run(now);
 }
 
 /* ---------- show categories ---------- */
@@ -430,7 +363,5 @@ module.exports = {
   listBookings, getBooking, upsertBooking, deleteBooking, setPendingCancel, djWeeklyMinutes, roadshowConflicts,
   listApprovedMembers, listPendingMembers, findMemberByEmail, insertMember, approveMember, deleteMember,
   getMember, setMediaMember,
-  setMemberPassword, checkMemberLogin, createMemberSession, getMemberSession, extendMemberSession,
-  deleteMemberSession, deleteMemberSessionsFor, createMemberToken, peekMemberToken, consumeMemberToken, purgeExpiredMemberAuth,
   listCategories, categoryExists, addCategory, updateCategory, deleteCategory, moveCategory
 };

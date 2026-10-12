@@ -23,6 +23,14 @@
     if (!key) return null;
     return CATEGORIES.find(function (c) { return c.key === key; }) || CATEGORIES.find(function (c) { return c.key === 'other'; }) || null;
   }
+  // One app, three addresses:
+  //   /       public, view-only schedule — clean enough to embed in an iframe
+  //   /book   booking page for media members (not linked publicly)
+  //   /admin  admin
+  var MODE = (function () {
+    var path = window.location.pathname.replace(/\/+$/, '');
+    return path === '/admin' ? 'admin' : path === '/book' ? 'book' : 'view';
+  })();
   var STUDIO_NAMES = { 1: 'Studio One', 2: 'Studio Two', 3: 'Roadshow' };
   var DEFAULT_SETTINGS = {
     djWeeklyCapMin: 120, djMinSlotMin: 30, djMaxSlotMin: 60, radioMaxHours: 2,
@@ -60,9 +68,13 @@
       super(props);
       var prefersDark = false;
       try { prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches; } catch (e) {}
+      // An embed can force a theme to match the host site: /?theme=light or /?theme=dark
+      var forcedTheme = null;
+      try { forcedTheme = new URLSearchParams(window.location.search).get('theme'); } catch (e) {}
+      if (forcedTheme === 'light' || forcedTheme === 'dark') { prefersDark = forcedTheme === 'dark'; this._manualTheme = true; }
       this.state = {
         studio: 1, weekStart: null, bookings: [], members: [], pendingMembers: [], adminMembers: [], categories: [],
-        member: null, acct: null, memberFilter: 'all', catDrafts: {}, catMsg: '', newCat: { label: '', color: '#6c7a89', hint: '' },
+        memberFilter: 'all', catDrafts: {}, catMsg: '', newCat: { label: '', color: '#6c7a89', hint: '' },
         settings: Object.assign({}, DEFAULT_SETTINGS), equipment: [],
         admin: false, adminError: '', adminNotice: '', page: 'schedule',
         modal: null, form: null, formError: '', saving: false, canOverride: false,
@@ -92,9 +104,8 @@
     dbFetchSettings() { return api('GET', '/api/settings'); }
     dbFetchEquipment() { return api('GET', '/api/equipment'); }
     dbFetchCategories() { return api('GET', '/api/categories'); }
-    dbFetchAccount() { return api('GET', '/api/account').then(function (d) { return d.member || null; }).catch(function () { return null; }); }
     setCategories(list) { CATEGORIES = list; this.setState({ categories: list }); }
-    // Admin-only lists: pending registrations, plus the full member list with account / media flags.
+    // Admin-only lists: pending registrations, plus the full member list with media flags.
     refreshPendingMembers() {
       this.dbFetchPendingMembers().then(function (list) { this.setState({ pendingMembers: list }); }.bind(this));
       api('GET', '/api/admin/members').then(function (list) { this.setState({ adminMembers: list }); }.bind(this)).catch(function () {});
@@ -137,19 +148,14 @@
       } catch (e) {}
       this._onResize = function () { if (this.state.fullWeek) this.forceUpdate(); }.bind(this);
       window.addEventListener('resize', this._onResize);
-      // A set-password link from an email lands here as ?setpw=<token>.
-      var setpw = null;
-      try { setpw = new URLSearchParams(window.location.search).get('setpw'); } catch (e) {}
-      if (setpw) {
-        try { window.history.replaceState(null, '', window.location.pathname); } catch (e) {}
-        this.openSetPassword(setpw);
-      }
       // Admin-only lists are fetched afterwards, and only if this browser is signed in as admin.
-      Promise.all([this.dbFetchBookings(), this.dbFetchMembers(), this.dbCheckAdminSession(), Promise.resolve([]), this.dbFetchSettings(), this.dbFetchEquipment(), this.dbFetchCategories(), this.dbFetchAccount()])
+      Promise.all([this.dbFetchBookings(), this.dbFetchMembers(), this.dbCheckAdminSession(), Promise.resolve([]), this.dbFetchSettings(), this.dbFetchEquipment(), this.dbFetchCategories()])
         .then(function (res) {
           CATEGORIES = res[6];
-          this.setState({ bookings: res[0], members: res[1], admin: res[2], pendingMembers: res[3], settings: res[4], equipment: res[5], categories: res[6], member: res[7], dbReady: true });
+          this.setState({ bookings: res[0], members: res[1], admin: res[2], pendingMembers: res[3], settings: res[4], equipment: res[5], categories: res[6], dbReady: true });
           if (res[2]) this.refreshPendingMembers();
+          // Arriving at /admin signed out: go straight to the passphrase prompt.
+          if (MODE === 'admin' && !res[2] && !this.state.modal) this.setState({ modal: 'login', loginError: '', loginPass: '' });
           this.finishLoading();
           this.startPolling();
         }.bind(this)).catch(function (e) {
@@ -158,7 +164,15 @@
           this.finishLoading();
         }.bind(this));
     }
+    postHeight() {
+      if (MODE !== 'view' || window.parent === window) return;
+      var ht = document.documentElement.scrollHeight;
+      if (ht === this._lastHeight) return;
+      this._lastHeight = ht;
+      try { window.parent.postMessage({ type: 'urb-schedule-height', height: ht }, '*'); } catch (e) {}
+    }
     componentDidUpdate(prevProps, prevState) {
+      this.postHeight();
       if (prevState.dark !== this.state.dark) this.syncTheme();
       if (prevState.fullWeek !== this.state.fullWeek) document.body.style.overflow = this.state.fullWeek ? 'hidden' : '';
     }
@@ -271,8 +285,10 @@
       var o = f.orig;
       return !o || o.date !== f.date || o.startMin !== f.startMin || o.endMin !== f.endMin || o.repeat !== f.repeat;
     }
-    memberMode() { return !!this.state.member && !this.state.admin; }
-    ownsBooking(b) { var m = this.state.member; return !!(m && b && m.email.toLowerCase() === String(b.email).toLowerCase()); }
+    canBook() { return MODE !== 'view'; }
+    // Who can be picked in "Booked by": admins see every approved member, the
+    // booking page only lists media members (the server sends just those).
+    memberChoices() { return this.state.admin ? this.state.adminMembers : this.state.members; }
     // Roadshow: map of equipment id -> the booking already holding it during the form's range.
     itemConflicts(form) {
       var fs = absStart(form), fe = absEnd(form), out = {};
@@ -306,21 +322,19 @@
         min = Math.max(0, Math.min(1440 - 30, min));
         startMin = min; endMin = Math.min(1440, min + 30);
       }
+      if (!this.canBook()) return;
       this.openNew(this.state.studio, d, startMin, endMin, []);
     }
     openNew(studio, d, startMin, endMin, items) {
-      // Signed-in members always book as themselves.
-      var me = this.memberMode() ? this.state.member : null;
       this.setState({
         modal: 'booking', formError: '', registering: false, canOverride: false,
-        form: { id: null, studio: studio, title: '', memberId: null, name: me ? me.name : '', email: me ? me.email : '', description: '', admin: this.state.admin, repeat: 'none', repeatRequest: false, category: null, icon: null, items: items, color: null, date: this.fmt(d), startMin: startMin, endMin: endMin, repeatUntil: null, orig: null }
+        form: { id: null, studio: studio, title: '', memberId: null, name: '', email: '', description: '', admin: this.state.admin, repeat: 'none', repeatRequest: false, category: null, icon: null, items: items, color: null, date: this.fmt(d), startMin: startMin, endMin: endMin, repeatUntil: null, orig: null }
       });
     }
-    // Admins can edit anything; a signed-in member can edit their own bookings
-    // exactly as if making them fresh. Everyone else gets the read-only view.
+    // Admins edit; everyone else gets the read-only view (with "Request to cancel" on /book).
     openEdit(o) {
       var b = o.booking;
-      if (!this.state.admin && !this.ownsBooking(b)) {
+      if (!this.state.admin) {
         this.setState({ modal: 'view', viewBooking: b, formError: '' });
         return;
       }
@@ -334,7 +348,7 @@
     closeModal() { this.setState({ modal: null, form: null, formError: '', registering: false, regSubmitted: false, saving: false, viewBooking: null, canOverride: false, crop: null }); }
 
     selectMember(idStr) {
-      var m = this.state.members.filter(function (x) { return String(x.id) === String(idStr); })[0];
+      var m = this.memberChoices().filter(function (x) { return String(x.id) === String(idStr); })[0];
       if (!m) return;
       this.setState(function (s) { return { form: Object.assign({}, s.form, { memberId: m.id, name: m.name, email: m.email }) }; });
     }
@@ -441,10 +455,8 @@
     deleteBooking() {
       var f = this.state.form; if (!f.id) return this.closeModal();
       var id = f.id;
-      if (!this.state.admin && !window.confirm('Cancel “' + f.title + '”' + (f.repeat === 'weekly' ? ' — every week of this slot' : '') + '? This can’t be undone.')) return;
       this.setState({ saving: true });
-      var url = this.state.admin ? '/api/admin/bookings/' : '/api/bookings/';
-      api('DELETE', url + encodeURIComponent(id)).then(function () {
+      api('DELETE', '/api/admin/bookings/' + encodeURIComponent(id)).then(function () {
         this.setState({ saving: false });
         this.persist(this.state.bookings.filter(function (b) { return b.id !== id; }));
         this.closeModal();
@@ -697,7 +709,7 @@
       if (this._eggCanvas === el) return;
       this.stopEgg();
       this._eggCanvas = el; this._bodies = [];
-      if (!this._digImg) { var img = new Image(); img.src = 'assets/dig-logo.png'; this._digImg = img; }
+      if (!this._digImg) { var img = new Image(); img.src = '/assets/dig-logo.png'; this._digImg = img; }
       var fit = function () {
         var dpr = window.devicePixelRatio || 1;
         var w = el.clientWidth, ht = el.clientHeight;
@@ -798,18 +810,10 @@
     /* ---------- who picker (member registry) ---------- */
     renderWho() {
       var f = this.state.form;
-      if (this.memberMode()) {
-        return h('div', { className: 'urb-who-box' },
-          h('div', { className: 'urb-who-selected' },
-            h('div', null, h('div', { className: 'urb-who-name' }, f.name), h('div', { className: 'urb-who-email' }, f.email)),
-            h('span', { className: 'urb-tag' }, 'You')
-          )
-        );
-      }
       if (this.state.regSubmitted) {
         return h('div', { className: 'urb-who-box' },
           h('div', { style: { fontWeight: 700, fontSize: '13.5px', marginBottom: '4px' } }, 'Registration sent'),
-          h('div', { className: 'urb-row-sub' }, 'Your registration is awaiting admin approval. Once approved, select yourself from the list to book.'),
+          h('div', { className: 'urb-row-sub' }, 'Your registration is waiting for an admin. Once they approve it and switch on your media membership, you’ll appear in the list.'),
           h('div', { className: 'urb-register-toggle' },
             h('button', { className: 'urb-link-btn', onClick: function () { this.setState({ regSubmitted: false }); }.bind(this) }, 'Back to member list')
           )
@@ -837,8 +841,8 @@
       return h('div', { className: 'urb-who-box' },
         this.labelEl('Who is this booking for? *'),
         h('select', { className: 'urb-select', value: '', onChange: function (e) { this.selectMember(e.target.value); }.bind(this) },
-          h('option', { value: '', disabled: true }, 'Select yourself…'),
-          this.state.members.map(function (m) { return h('option', { key: m.id, value: m.id }, m.name + ' — ' + m.email); })
+          h('option', { value: '', disabled: true }, this.state.admin ? 'Select a member…' : 'Select yourself…'),
+          this.memberChoices().map(function (m) { return h('option', { key: m.id, value: m.id }, m.name + ' — ' + m.email); })
         ),
         h('div', { className: 'urb-register-toggle' },
           h('button', { className: 'urb-link-btn', onClick: this.startRegister.bind(this) }, 'Not on the list? Register')
@@ -857,9 +861,12 @@
       var style = Object.assign({ top: (top + 1) + 'px', height: (height - 2) + 'px', padding: compact ? '2px 7px' : '5px 8px' }, look.style);
       var meta = [];
       if (b.repeat === 'weekly') meta.push(h('span', { key: 'r', title: 'Weekly slot' }, '↻'));
-      if (b.pendingRepeat) meta.push(h('span', { key: 'p', title: 'Awaiting approval' }, '⏳'));
-      if (b.pendingCancel) meta.push(h('span', { key: 'x', title: 'Cancellation requested' }, '🚫'));
-      if (locked) meta.push(h('span', { key: 'l', title: 'Admin booking' }, '🔒'));
+      // Status markers are for members and admin, not the public schedule.
+      if (MODE !== 'view') {
+        if (b.pendingRepeat) meta.push(h('span', { key: 'p', title: 'Awaiting approval' }, '⏳'));
+        if (b.pendingCancel) meta.push(h('span', { key: 'x', title: 'Cancellation requested' }, '🚫'));
+        if (locked) meta.push(h('span', { key: 'l', title: 'Admin booking' }, '🔒'));
+      }
       var children = [
         h('div', { key: 'h', className: 'urb-block-head' },
           b.icon ? h('img', { className: 'urb-block-icon', src: b.icon, alt: '' }) : null,
@@ -1045,7 +1052,7 @@
             var here = mine.filter(function (b) { return absStart(b) < dE && dS < absEnd(b); });
             return h('td', {
               key: i, className: 'urb-rs-cell' + (ds === todayStr ? ' today' : '') + (it.active ? '' : ' disabled'),
-              onClick: it.active ? function () { this.openNew(3, d, 9 * 60, 17 * 60, [it.id]); }.bind(this) : null
+              onClick: it.active && this.canBook() ? function () { this.openNew(3, d, 9 * 60, 17 * 60, [it.id]); }.bind(this) : null
             }, here.map(function (b) {
               var bs = absStart(b), be = absEnd(b);
               var from = bs > dS ? this.minLabel(bs - dS) : '…', to = be < dE ? this.minLabel(be - dS) : '…';
@@ -1131,7 +1138,7 @@
             ),
             this.state.formError ? h('div', { className: 'urb-error-box' }, this.state.formError) : null,
             h('div', { className: 'urb-actions' },
-              f.id ? h('button', { className: this.btnClass('danger'), disabled: this.state.saving, onClick: this.deleteBooking.bind(this) }, this.state.admin ? 'Delete' : 'Cancel booking') : null,
+              f.id ? h('button', { className: this.btnClass('danger'), disabled: this.state.saving, onClick: this.deleteBooking.bind(this) }, 'Delete') : null,
               h('div', { style: { flex: 1 } }),
               h('button', { className: this.btnClass('ghost'), onClick: this.closeModal.bind(this) }, 'Close'),
               this.state.canOverride ? h('button', { className: this.btnClass('ghost'), disabled: this.state.saving, onClick: function () { this.saveBooking(true); }.bind(this) }, 'Request admin override') : null,
@@ -1364,14 +1371,10 @@
               b.repeat === 'weekly' ? h('span', { className: 'urb-row-sub' }, '↻ Weekly slot') : null,
               b.admin ? h('span', { className: 'urb-row-sub' }, '🔒 Admin booking') : null
             ),
-            this.state.member ? null : h('div', { className: 'urb-hint-box' },
-              'Is this your booking? ',
-              h('button', { className: 'urb-link-btn', onClick: function () { this.openAccount('login'); }.bind(this) }, 'Log in'),
-              ' to change or cancel it yourself.'),
             this.state.formError ? h('div', { className: 'urb-error-box' }, this.state.formError) : null,
             h('div', { className: 'urb-actions' },
               h('button', { className: this.btnClass('ghost', true), onClick: this.closeModal.bind(this) }, 'Close'),
-              b.pendingCancel
+              MODE === 'view' ? null : b.pendingCancel
                 ? h('button', { className: this.btnClass('ghost', true), disabled: true }, 'Cancellation requested')
                 : h('button', { className: this.btnClass('danger', true), disabled: this.state.saving, onClick: function () { this.requestCancel(b.id); }.bind(this) }, 'Request to cancel')
             )
@@ -1464,7 +1467,6 @@
     renderMembersPage() {
       var all = this.state.adminMembers;
       var media = all.filter(function (m) { return m.mediaMember; }).length;
-      var accounts = all.filter(function (m) { return m.hasAccount; }).length;
       var filter = this.state.memberFilter;
       var shown = all.filter(function (m) { return filter === 'all' || (filter === 'media' ? m.mediaMember : !m.mediaMember); });
       var chip = function (key, label) {
@@ -1474,8 +1476,7 @@
         return h('div', { key: m.id, className: 'urb-member-row' + (m.mediaMember ? ' media' : '') },
           h('div', { style: { flex: '1 1 160px', minWidth: 0 } },
             h('div', { className: 'urb-row-title' }, m.name,
-              m.mediaMember ? h('span', { className: 'urb-tag urb-tag-media' }, 'Media member') : null,
-              m.hasAccount ? h('span', { className: 'urb-tag', title: 'Has set a password and can edit their own bookings' }, 'Account') : null),
+              m.mediaMember ? h('span', { className: 'urb-tag urb-tag-media' }, 'Media member') : null),
             h('div', { className: 'urb-row-sub urb-break' }, m.email)
           ),
           h('label', { className: 'urb-switch', title: 'Media membership' },
@@ -1495,10 +1496,9 @@
         ),
         h('div', { className: 'urb-stat-row' },
           h('div', { className: 'urb-stat' }, h('b', null, all.length), ' members'),
-          h('div', { className: 'urb-stat urb-stat-media' }, h('b', null, media), ' with media membership'),
-          h('div', { className: 'urb-stat' }, h('b', null, accounts), ' have an account')
+          h('div', { className: 'urb-stat urb-stat-media' }, h('b', null, media), ' with media membership')
         ),
-        h('div', { className: 'urb-row-sub' }, 'New registrations wait under Admin on the Schedule tab until you approve them. “Account” means they have set a password and can edit their own bookings.'),
+        h('div', { className: 'urb-row-sub' }, 'Only media members can book on the /book page. New registrations wait under Admin on the Schedule tab until you approve them — then switch on their media membership here.'),
         this.state.adminError ? h('div', { className: 'urb-error' }, this.state.adminError) : null,
         h('div', { className: 'urb-admin-nav', style: { marginTop: '12px' } }, chip('all', 'All'), chip('media', 'Media members'), chip('nonmedia', 'No media membership')),
         h('div', { className: 'urb-admin-section' },
@@ -1581,127 +1581,6 @@
             ),
             h('div', { className: 'urb-cat-actions' }, h('button', { className: this.btnClass('primary'), onClick: this.addCategory.bind(this) }, 'Add'))
           )
-        )
-      );
-    }
-
-    /* ---------- member accounts ---------- */
-    // acct.mode: 'login' | 'link' (create account / forgot password) | 'sent' | 'setpw' | 'me'
-    openAccount(mode) {
-      var email = (this.state.acct && this.state.acct.email) || '';
-      this.setState({ modal: null, viewBooking: null, acct: { mode: mode, email: email, password: '', password2: '', busy: false, error: '', message: '' } });
-    }
-    acctSet(patch) { this.setState(function (s) { return { acct: Object.assign({}, s.acct, patch) }; }); }
-    closeAccount() { this.setState({ acct: null }); }
-    memberLogin() {
-      var a = this.state.acct;
-      if (!a.email.trim() || !a.password) return this.acctSet({ error: 'Enter your email and password.' });
-      this.acctSet({ busy: true, error: '' });
-      api('POST', '/api/account/login', { email: a.email.trim(), password: a.password }).then(function (d) {
-        this.setState({ member: d.member, acct: null });
-      }.bind(this)).catch(function (e) { this.acctSet({ busy: false, error: e.message }); }.bind(this));
-    }
-    requestLink() {
-      var a = this.state.acct;
-      if (!GENERIC_EMAIL_RE.test(a.email.trim())) return this.acctSet({ error: 'Enter the email you registered with.' });
-      this.acctSet({ busy: true, error: '' });
-      api('POST', '/api/account/request-link', { email: a.email.trim() }).then(function (d) {
-        this.acctSet({ busy: false, mode: 'sent', message: d.message });
-      }.bind(this)).catch(function (e) { this.acctSet({ busy: false, error: e.message }); }.bind(this));
-    }
-    openSetPassword(token) {
-      this.setState({ acct: { mode: 'setpw', token: token, password: '', password2: '', busy: true, error: '', message: '', info: null } });
-      api('GET', '/api/account/link/' + encodeURIComponent(token)).then(function (info) {
-        this.acctSet({ busy: false, info: info });
-      }.bind(this)).catch(function (e) { this.acctSet({ busy: false, mode: 'link', error: e.message, email: '' }); }.bind(this));
-    }
-    submitSetPassword() {
-      var a = this.state.acct;
-      if (a.password.length < 8) return this.acctSet({ error: 'Use at least 8 characters.' });
-      if (a.password !== a.password2) return this.acctSet({ error: 'The two passwords don’t match.' });
-      this.acctSet({ busy: true, error: '' });
-      api('POST', '/api/account/set-password', { token: a.token, password: a.password }).then(function (d) {
-        this.setState({ member: d.member, acct: { mode: 'me', welcome: true, email: d.member.email, busy: false, error: '', message: '' } });
-      }.bind(this)).catch(function (e) { this.acctSet({ busy: false, error: e.message }); }.bind(this));
-    }
-    memberLogout() {
-      api('POST', '/api/account/logout').catch(function () {});
-      this.setState({ member: null, acct: null });
-    }
-    renderAccount() {
-      var a = this.state.acct;
-      if (!a) return null;
-      var set = this.acctSet.bind(this);
-      var close = this.closeAccount.bind(this);
-      var emailInput = function (onEnter) {
-        return h('div', { className: 'urb-field' }, this.labelEl('Email'),
-          this.input({ type: 'email', autoComplete: 'username', autoFocus: true, value: a.email, placeholder: 'ab1234@bath.ac.uk', onChange: function (e) { set({ email: e.target.value, error: '' }); }, onKeyDown: function (e) { if (e.key === 'Enter') onEnter(); } }));
-      }.bind(this);
-      var title, body;
-      if (a.mode === 'login') {
-        title = 'Member login';
-        body = [
-          h('div', { key: 'i', className: 'urb-row-sub', style: { marginBottom: '12px' } }, 'Log in to change or cancel your own bookings. You don’t need an account to book.'),
-          h('div', { key: 'e' }, emailInput(this.memberLogin.bind(this))),
-          h('div', { key: 'p', className: 'urb-field' }, this.labelEl('Password'),
-            this.input({ type: 'password', autoComplete: 'current-password', value: a.password, onChange: function (e) { set({ password: e.target.value, error: '' }); }, onKeyDown: function (e) { if (e.key === 'Enter') this.memberLogin(); }.bind(this) })),
-          a.error ? h('div', { key: 'x', className: 'urb-error-box' }, a.error) : null,
-          h('div', { key: 'a', className: 'urb-actions' },
-            h('button', { className: this.btnClass('ghost', true), onClick: close }, 'Cancel'),
-            h('button', { className: this.btnClass('primary', true), disabled: a.busy, onClick: this.memberLogin.bind(this) }, a.busy ? 'Logging in…' : 'Log in')),
-          h('div', { key: 'l', className: 'urb-acct-links' },
-            h('button', { className: 'urb-link-btn', onClick: function () { set({ mode: 'link', error: '', fresh: true }); } }, 'First time? Create your account'),
-            h('button', { className: 'urb-link-btn', onClick: function () { set({ mode: 'link', error: '', fresh: false }); } }, 'Forgot password?'))
-        ];
-      } else if (a.mode === 'link') {
-        title = a.fresh === false ? 'Reset your password' : 'Create your account';
-        body = [
-          h('div', { key: 'i', className: 'urb-row-sub', style: { marginBottom: '12px' } },
-            a.fresh === false ? 'Enter your email and we’ll send you a link to choose a new password.'
-              : 'Already registered to book? Enter the same email and we’ll send a link to it so you can choose a password. No need to register again.'),
-          h('div', { key: 'e' }, emailInput(this.requestLink.bind(this))),
-          a.error ? h('div', { key: 'x', className: 'urb-error-box' }, a.error) : null,
-          h('div', { key: 'a', className: 'urb-actions' },
-            h('button', { className: this.btnClass('ghost', true), onClick: function () { set({ mode: 'login', error: '' }); } }, 'Back'),
-            h('button', { className: this.btnClass('primary', true), disabled: a.busy, onClick: this.requestLink.bind(this) }, a.busy ? 'Sending…' : 'Email me a link'))
-        ];
-      } else if (a.mode === 'sent') {
-        title = 'Check your email';
-        body = [
-          h('div', { key: 'i', style: { fontSize: '14px', lineHeight: 1.45, marginBottom: '14px' } }, a.message),
-          h('div', { key: 'a', className: 'urb-actions' }, h('button', { className: this.btnClass('primary', true), onClick: close }, 'OK'))
-        ];
-      } else if (a.mode === 'setpw') {
-        title = a.info && a.info.hasAccount ? 'Choose a new password' : 'Set up your account';
-        body = a.busy && !a.info ? [h('div', { key: 'l', className: 'urb-row-sub' }, 'Checking your link…')] : [
-          a.info ? h('div', { key: 'w', className: 'urb-row-sub', style: { marginBottom: '12px' } }, 'Hi ' + a.info.name + ' — choose a password for ' + a.info.email + '.') : null,
-          h('div', { key: 'p', className: 'urb-field' }, this.labelEl('New password (8+ characters)'),
-            this.input({ type: 'password', autoComplete: 'new-password', autoFocus: true, value: a.password, onChange: function (e) { set({ password: e.target.value, error: '' }); } })),
-          h('div', { key: 'p2', className: 'urb-field' }, this.labelEl('Type it again'),
-            this.input({ type: 'password', autoComplete: 'new-password', value: a.password2, onChange: function (e) { set({ password2: e.target.value, error: '' }); }, onKeyDown: function (e) { if (e.key === 'Enter') this.submitSetPassword(); }.bind(this) })),
-          a.error ? h('div', { key: 'x', className: 'urb-error-box' }, a.error) : null,
-          h('div', { key: 'a', className: 'urb-actions' },
-            h('button', { className: this.btnClass('ghost', true), onClick: close }, 'Cancel'),
-            h('button', { className: this.btnClass('primary', true), disabled: a.busy, onClick: this.submitSetPassword.bind(this) }, a.busy ? 'Saving…' : 'Save password'))
-        ];
-      } else {
-        var m = this.state.member;
-        title = a.welcome ? 'You’re all set' : 'Your account';
-        body = [
-          h('div', { key: 'i', style: { fontSize: '14px', lineHeight: 1.45, marginBottom: '14px' } },
-            a.welcome ? 'You’re logged in. Tap any of your bookings on the schedule to change or cancel it.' : 'Logged in as ',
-            a.welcome ? null : h('b', null, m ? m.name + ' (' + m.email + ')' : '')),
-          h('div', { key: 'a', className: 'urb-actions' },
-            a.welcome ? null : h('button', { className: this.btnClass('danger', true), onClick: this.memberLogout.bind(this) }, 'Log out'),
-            h('button', { className: this.btnClass('primary', true), onClick: close }, a.welcome ? 'Go to schedule' : 'Close')),
-          a.welcome ? null : h('div', { key: 'l', className: 'urb-acct-links' },
-            h('button', { className: 'urb-link-btn', onClick: function () { set({ mode: 'link', fresh: false, email: m ? m.email : '' }); } }, 'Change password'))
-        ];
-      }
-      return h('div', { className: 'urb-overlay urb-overlay-top urb-fade', onClick: close },
-        h('div', { className: 'urb-card urb-pop', onClick: function (e) { e.stopPropagation(); } },
-          h('div', { className: 'urb-card-head' }, h('span', null, '👤'), h('div', { className: 'urb-card-head-title' }, title)),
-          h('div', { className: 'urb-card-body' }, body)
         )
       );
     }
@@ -1797,14 +1676,63 @@
     }
 
     /* ---------- top level ---------- */
-    render() {
-      var studio = this.state.studio;
+    renderSchedule(studio) {
       var studioName = STUDIO_NAMES[studio];
       var studioDesc = studio === 1 ? 'Radio Studio' : (studio === 2 ? 'DJ Booth' : 'Equipment for events — tap a cell to book an item');
+      // The public schedule shows the two studios; Roadshow equipment is for members and admin.
+      var tabs = [[1, 'STUDIO ONE', 'Live Radio'], [2, 'STUDIO TWO', 'DJ Studio']];
+      if (MODE !== 'view') tabs.push([3, 'ROADSHOW', 'Equipment']);
+      return h('div', null,
+        h('div', { className: 'urb-tabs' },
+          tabs.map(function (t) {
+            return h('button', { key: t[0], className: 'urb-tab' + (studio === t[0] ? ' active' : ''), onClick: function () { this.setState({ studio: t[0] }); }.bind(this) },
+              h('span', { className: 'urb-tab-title' }, t[1]), h('span', { className: 'urb-tab-sub' }, t[2]));
+          }, this)
+        ),
+
+        this.renderAdminPanel(),
+
+        h('div', { className: 'urb-shell' },
+          h('div', { className: 'urb-toolbar' },
+            h('div', { style: { display: 'flex', gap: '6px' } },
+              h('button', { className: 'btn btn-icon', onClick: this.prevWeek.bind(this), 'aria-label': 'Previous week' }, '‹'),
+              h('button', { className: 'btn btn-sm', onClick: this.goToday.bind(this) }, 'Today'),
+              h('button', { className: 'btn btn-icon', onClick: this.nextWeek.bind(this), 'aria-label': 'Next week' }, '›')
+            ),
+            h('div', { className: 'urb-weeklabel' }, this.weekLabelText()),
+            h('div', { className: 'urb-spacer' }),
+            studio !== 3 ? h('button', { className: 'btn btn-sm', onClick: function () { this.setState({ fullWeek: true }); }.bind(this) }, '▦ View full schedule') : null
+          ),
+          h('div', { className: 'urb-studio-head' },
+            h('div', { className: 'urb-studio-name' }, studioName),
+            h('div', { className: 'urb-studio-desc' }, studio === 3 || MODE !== 'view' ? studioDesc : studioDesc + ' · tap a show for details')
+          ),
+          studio !== 3 ? this.renderCategoryKey(false) : null,
+          studio === 3 ? this.renderRoadshow() : this.renderGrid()
+        )
+      );
+    }
+    render() {
+      var studio = MODE === 'view' && this.state.studio === 3 ? 1 : this.state.studio;
       var idleAnim = this.state.idle && this.state.loadPhase === 'done';
       var page = this.state.admin ? this.state.page : 'schedule';
+      var overlays = [
+        h(React.Fragment, { key: 'fw' }, this.renderFullWeek()),
+        h(React.Fragment, { key: 'md' }, this.renderModal())
+      ];
 
-      return h('div', { className: 'urb-page' },
+      // Public, embeddable schedule: just the timetable — no header, buttons or footer.
+      if (MODE === 'view') {
+        return h('div', { className: 'urb-page urb-mode-view' },
+          h('div', { className: 'urb-wrap' },
+            this.state.dbError ? h('div', { className: 'db-banner error' }, this.state.dbError) : null,
+            this.renderSchedule(studio)
+          ),
+          overlays
+        );
+      }
+
+      return h('div', { className: 'urb-page urb-mode-' + MODE },
         h('div', { className: 'urb-wrap' },
 
           h('div', { className: 'urb-toprow' },
@@ -1812,18 +1740,15 @@
           ),
 
           h('div', { className: 'urb-header' },
-            h('img', { className: 'urb-logo' + (idleAnim ? ' idle' : ''), src: 'assets/logo.png', alt: 'URB 1449 AM', title: 'URB 1449 AM', onClick: this.openEgg.bind(this) }),
+            h('img', { className: 'urb-logo' + (idleAnim ? ' idle' : ''), src: '/assets/logo.png', alt: 'URB 1449 AM', title: 'URB 1449 AM', onClick: this.openEgg.bind(this) }),
             h('div', null,
-              h('div', { className: 'urb-brand-title' }, 'URB Studio Booking'),
-              h('div', { className: 'urb-brand-sub' }, 'Live radio & DJ studio reservations')
+              h('div', { className: 'urb-brand-title' }, MODE === 'admin' ? 'URB Studio Booking — Admin' : 'URB Studio Booking'),
+              h('div', { className: 'urb-brand-sub' }, MODE === 'admin' ? 'Manage bookings, members and settings' : 'Book the studios — media members only')
             ),
             h('div', { className: 'urb-spacer' }),
-            h('div', { className: 'urb-header-actions' },
-              this.state.member
-                ? h('button', { className: 'btn btn-md', onClick: function () { this.openAccount('me'); }.bind(this) }, '👤 ' + this.state.member.name.split(' ')[0])
-                : h('button', { className: 'btn btn-md', onClick: function () { this.openAccount('login'); }.bind(this) }, '👤 Member login'),
-              h('button', { className: 'btn btn-md' + (this.state.admin ? ' btn-primary' : ''), onClick: this.toggleAdmin.bind(this) }, this.state.admin ? '✓ Admin — exit' : '🔓 Admin')
-            )
+            MODE === 'admin' ? h('div', { className: 'urb-header-actions' },
+              h('button', { className: 'btn btn-md' + (this.state.admin ? ' btn-primary' : ''), onClick: this.toggleAdmin.bind(this) }, this.state.admin ? '✓ Admin — sign out' : '🔓 Admin sign-in')
+            ) : null
           ),
 
           h('div', { className: 'db-banner ' + (this.state.dbError ? 'error' : (!this.state.dbReady ? 'pending' : 'ok')) }, this.state.dbError || 'Connecting…'),
@@ -1839,48 +1764,17 @@
           page === 'categories' ? this.renderCategoriesPage() : null,
           page === 'settings' ? this.renderSettingsPage() : null,
           page === 'equipment' ? this.renderEquipmentPage() : null,
-
-          page === 'schedule' ? h('div', null,
-            h('div', { className: 'urb-tabs' },
-              [[1, 'STUDIO ONE', 'Live Radio'], [2, 'STUDIO TWO', 'DJ Studio'], [3, 'ROADSHOW', 'Equipment']].map(function (t) {
-                return h('button', { key: t[0], className: 'urb-tab' + (studio === t[0] ? ' active' : ''), onClick: function () { this.setState({ studio: t[0] }); }.bind(this) },
-                  h('span', { className: 'urb-tab-title' }, t[1]), h('span', { className: 'urb-tab-sub' }, t[2]));
-              }, this)
-            ),
-
-            this.renderAdminPanel(),
-
-            h('div', { className: 'urb-shell' },
-              h('div', { className: 'urb-toolbar' },
-                h('div', { style: { display: 'flex', gap: '6px' } },
-                  h('button', { className: 'btn btn-icon', onClick: this.prevWeek.bind(this) }, '‹'),
-                  h('button', { className: 'btn btn-sm', onClick: this.goToday.bind(this) }, 'Today'),
-                  h('button', { className: 'btn btn-icon', onClick: this.nextWeek.bind(this) }, '›')
-                ),
-                h('div', { className: 'urb-weeklabel' }, this.weekLabelText()),
-                h('div', { className: 'urb-spacer' }),
-                studio !== 3 ? h('button', { className: 'btn btn-sm', onClick: function () { this.setState({ fullWeek: true }); }.bind(this) }, '▦ View full schedule') : null
-              ),
-              h('div', { className: 'urb-studio-head' },
-                h('div', { className: 'urb-studio-name' }, studioName),
-                h('div', { className: 'urb-studio-desc' }, studioDesc)
-              ),
-              studio !== 3 ? this.renderCategoryKey(false) : null,
-              studio === 3 ? this.renderRoadshow() : this.renderGrid()
-            )
-          ) : null,
+          page === 'schedule' ? this.renderSchedule(studio) : null,
 
           h('div', { className: 'urb-footer' }, 'Toby Gilday 2026')
         ),
 
-        this.renderFullWeek(),
-        this.renderModal(),
+        overlays,
         this.renderCrop(),
-        this.renderAccount(),
         this.renderReauth(),
         this.renderEgg(),
         this.state.loadPhase === 'done' ? null : h('div', { className: 'urb-loader' + (this.state.loadPhase === 'out' ? ' out' : '') },
-          h('img', { src: 'assets/logo.png', alt: '' })
+          h('img', { src: '/assets/logo.png', alt: '' })
         )
       );
     }

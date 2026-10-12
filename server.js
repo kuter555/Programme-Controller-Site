@@ -6,7 +6,6 @@ const crypto = require('crypto');
 const express = require('express');
 const cookieParser = require('cookie-parser');
 const db = require('./db');
-const mailer = require('./mailer');
 
 const PORT = process.env.PORT || 3000;
 if (!process.env.ADMIN_PASSPHRASE) {
@@ -14,7 +13,6 @@ if (!process.env.ADMIN_PASSPHRASE) {
   process.exit(1);
 }
 db.ensureAdminPassphrase(process.env.ADMIN_PASSPHRASE);
-if (!mailer.configured) console.warn('SMTP is not configured — account emails will be printed to this log instead of sent.');
 
 const BATH_EMAIL_RE = /^[a-z0-9._%+-]+@bath\.ac\.uk$/i;
 const GENERIC_EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -58,56 +56,8 @@ function setSessionCookie(req, res, token) {
   res.cookie(SESSION_COOKIE, token, { httpOnly: true, sameSite: 'lax', secure: req.secure, maxAge: SESSION_TTL_MS });
 }
 
-/* ---------- member accounts ---------- */
-// Accounts are optional and only exist so members can edit or cancel their own
-// bookings. A password is set (or reset) through a one-time emailed link.
-const MEMBER_COOKIE = 'urb_member';
-const MEMBER_TTL_MS = 60 * 24 * 60 * 60 * 1000; // 60 days since last use
-const LINK_TTL_MS = 2 * 60 * 60 * 1000;         // emailed links last 2 hours
-const MIN_PASSWORD = 8;
-
-function setMemberCookie(req, res, token) {
-  res.cookie(MEMBER_COOKIE, token, { httpOnly: true, sameSite: 'lax', secure: req.secure, maxAge: MEMBER_TTL_MS });
-}
-function startMemberSession(req, res, memberId) {
-  const token = crypto.randomBytes(24).toString('hex');
-  db.createMemberSession(token, memberId, Date.now() + MEMBER_TTL_MS);
-  setMemberCookie(req, res, token);
-}
-// The signed-in member (sliding the session forward), or null.
-function currentMember(req, res) {
-  const token = req.cookies[MEMBER_COOKIE];
-  if (!token) return null;
-  const m = db.getMemberSession(token, Date.now());
-  if (!m) return null;
-  db.extendMemberSession(token, Date.now() + MEMBER_TTL_MS);
-  setMemberCookie(req, res, token);
-  return m;
-}
 function publicMember(m) { return m ? { id: m.id, name: m.name, email: m.email } : null; }
-function ownsBooking(m, b) { return !!(m && b && m.email.toLowerCase() === String(b.email).toLowerCase()); }
-
-// Small in-memory throttles: failed logins per email, and link emails per email.
-const loginFails = new Map(); // email -> { n, first }
-const linkSent = new Map();   // email -> timestamp
-function tooManyFails(email) {
-  const f = loginFails.get(email);
-  if (!f) return false;
-  if (Date.now() - f.first > 15 * 60 * 1000) { loginFails.delete(email); return false; }
-  return f.n >= 8;
-}
-function noteFail(email) {
-  const f = loginFails.get(email);
-  if (!f || Date.now() - f.first > 15 * 60 * 1000) loginFails.set(email, { n: 1, first: Date.now() });
-  else f.n++;
-}
-
-setInterval(function () {
-  const now = Date.now();
-  db.purgeExpiredSessions(now);
-  db.purgeExpiredMemberAuth(now);
-  for (const [k, t] of linkSent) if (now - t > 60 * 1000) linkSent.delete(k);
-}, 10 * 60 * 1000).unref();
+setInterval(function () { db.purgeExpiredSessions(Date.now()); }, 10 * 60 * 1000).unref();
 
 const uploadsDir = path.join(__dirname, 'data', 'uploads');
 if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
@@ -122,6 +72,9 @@ app.use(cookieParser());
 app.use('/uploads', express.static(uploadsDir));
 app.use('/data', (req, res) => res.status(404).end()); // never serve the database folder
 app.use(express.static(__dirname, { index: 'index.html', dotfiles: 'deny' }));
+// The same single-page app serves all three addresses; it reads the path to decide
+// what to show: / = public view-only schedule (embeddable), /book = booking, /admin = admin.
+app.get(['/book', '/admin'], (req, res) => res.sendFile(path.join(__dirname, 'index.html')));
 
 /* ---------- date helpers (mirrors the Monday-start week logic in app.js) ---------- */
 function parseDate(s) { const p = s.split('-').map(Number); return new Date(p[0], p[1] - 1, p[2]); }
@@ -186,7 +139,8 @@ function checkRoadshow(b) {
 
 /* ---------- public read endpoints ---------- */
 app.get('/api/bookings', (req, res) => res.json(db.listBookings()));
-app.get('/api/members', (req, res) => res.json(db.listApprovedMembers().map(publicMember)));
+// Feeds the /book "who is this booking for?" dropdown — only media members can book.
+app.get('/api/members', (req, res) => res.json(db.listApprovedMembers().filter(m => m.mediaMember).map(publicMember)));
 app.get('/api/settings', (req, res) => res.json(db.getSettings()));
 app.get('/api/equipment', (req, res) => res.json(db.listEquipment()));
 app.get('/api/categories', (req, res) => res.json(db.listCategories()));
@@ -200,7 +154,9 @@ app.post('/api/members', (req, res) => {
   if (!BATH_EMAIL_RE.test(email)) return res.status(400).json({ error: 'Please use your @bath.ac.uk email address.' });
   const existing = db.findMemberByEmail(email);
   if (existing) {
-    return res.status(409).json({ error: existing.approved ? 'That email is already registered — select it from the list instead.' : 'That email has already been registered and is awaiting admin approval.' });
+    return res.status(409).json({ error: !existing.approved ? 'That email has already been registered and is awaiting admin approval.'
+      : existing.mediaMember ? 'That email is already registered — select it from the list instead.'
+      : 'That email is registered but doesn’t have media membership yet — ask an admin to switch it on.' });
   }
   try {
     res.status(201).json(publicMember(db.insertMember(name, email)));
@@ -209,75 +165,6 @@ app.post('/api/members', (req, res) => {
     console.error(e);
     res.status(500).json({ error: 'Could not register — try again.' });
   }
-});
-
-/* ---------- member accounts ---------- */
-app.get('/api/account', (req, res) => res.json({ member: publicMember(currentMember(req, res)) }));
-
-app.post('/api/account/login', (req, res) => {
-  const email = String((req.body && req.body.email) || '').trim().toLowerCase();
-  const password = String((req.body && req.body.password) || '');
-  if (tooManyFails(email)) return res.status(429).json({ error: 'Too many attempts — wait 15 minutes or reset your password.' });
-  const m = db.checkMemberLogin(email, password);
-  if (!m) {
-    noteFail(email);
-    return res.status(401).json({ error: 'Wrong email or password. First time here? Use “Create account” to get a link.' });
-  }
-  loginFails.delete(email);
-  startMemberSession(req, res, m.id);
-  res.json({ member: publicMember(m) });
-});
-
-app.post('/api/account/logout', (req, res) => {
-  if (req.cookies[MEMBER_COOKIE]) db.deleteMemberSession(req.cookies[MEMBER_COOKIE]);
-  res.clearCookie(MEMBER_COOKIE);
-  res.json({ ok: true });
-});
-
-// One endpoint for both "create my account" and "forgot password": either way
-// the member gets a one-time link to their registered email to set a password.
-// The reply is the same whether or not the email is registered, so this can't
-// be used to find out who is a member.
-app.post('/api/account/request-link', (req, res) => {
-  const email = String((req.body && req.body.email) || '').trim().toLowerCase();
-  if (!GENERIC_EMAIL_RE.test(email)) return res.status(400).json({ error: 'Please enter your email address.' });
-  const reply = { ok: true, message: 'If that email belongs to a registered member, a link is on its way. It expires in 2 hours — check your junk folder too.' };
-  const m = db.findMemberByEmail(email);
-  if (!m || !m.approved) return res.json(reply);
-  if (linkSent.has(m.email)) return res.json(reply); // at most one email a minute per address
-  linkSent.set(m.email, Date.now());
-
-  const base = (process.env.APP_URL || (req.protocol + '://' + req.get('host'))).replace(/\/+$/, '');
-  const link = base + '/?setpw=' + db.createMemberToken(m.id, LINK_TTL_MS);
-  const fresh = !m.hasAccount;
-  const subject = fresh ? 'Set up your URB Studio Booking account' : 'Reset your URB Studio Booking password';
-  const text = 'Hi ' + m.name + ',\n\n' +
-    (fresh ? 'Use this link to choose a password for your URB Studio Booking account. Once it’s set you can log in to edit or cancel your own bookings:'
-           : 'Someone (hopefully you) asked to reset the password for your URB Studio Booking account. Use this link to choose a new one:') +
-    '\n\n' + link + '\n\nThe link works once and expires in 2 hours. If you didn’t ask for this, you can ignore this email.\n\n— URB 1449 AM';
-  mailer.sendMail(m.email, subject, text).catch(e => console.error('Could not send account email to ' + m.email + ':', e.message));
-  res.json(reply);
-});
-
-// Lets the set-password screen greet the member and spot dead links early.
-app.get('/api/account/link/:token', (req, res) => {
-  const id = db.peekMemberToken(req.params.token);
-  const m = id && db.getMember(id);
-  if (!m) return res.status(410).json({ error: 'This link has expired or already been used. Ask for a new one from “Member login”.' });
-  res.json({ name: m.name, email: m.email, hasAccount: m.hasAccount });
-});
-
-app.post('/api/account/set-password', (req, res) => {
-  const password = String((req.body && req.body.password) || '');
-  if (password.length < MIN_PASSWORD) return res.status(400).json({ error: 'Use at least ' + MIN_PASSWORD + ' characters.' });
-  const id = db.consumeMemberToken(req.body && req.body.token);
-  const m = id && db.getMember(id);
-  if (!m || !m.approved) return res.status(410).json({ error: 'This link has expired or already been used. Ask for a new one from “Member login”.' });
-  db.setMemberPassword(m.id, password);
-  db.deleteMemberSessionsFor(m.id); // a reset signs out any other devices
-  loginFails.delete(m.email);
-  startMemberSession(req, res, m.id);
-  res.json({ member: publicMember(m) });
 });
 
 /* ---------- show icon upload (already cropped square in the browser) ---------- */
@@ -294,9 +181,8 @@ app.post('/api/icon', (req, res) => {
   });
 });
 
-/* ---------- member booking writes ----------
-   Anyone can create a booking. Changing or deleting one afterwards needs a
-   member login for the email the booking is under (or an admin). */
+/* ---------- member booking writes (create only — changing or cancelling an
+   existing booking goes through the request-cancel flow / an admin) ---------- */
 function validateMemberBooking(b, s, existing) {
   if (!b || typeof b !== 'object') return 'Invalid booking.';
   if (!b.id || !b.title || !String(b.title).trim()) return 'Please enter a booking title.';
@@ -326,30 +212,16 @@ function validateMemberBooking(b, s, existing) {
 app.post('/api/bookings', (req, res) => {
   const b = req.body;
   const s = db.getSettings();
-  const me = currentMember(req, res);
-  const existing = b && b.id ? db.getBooking(b.id) : null;
-
-  if (existing) {
-    // Editing: only the member the booking belongs to.
-    if (!me) return res.status(401).json({ error: 'Log in with the account this booking is under to change it.' });
-    if (!ownsBooking(me, existing)) return res.status(403).json({ error: 'You can only change your own bookings.' });
-    b.studio = existing.studio;
-    // Weekly slots stay weekly (an admin approved them); members can't create new repeats.
-    b.repeat = existing.repeat;
-    b.repeatUntil = existing.repeatUntil;
-    b.admin = existing.admin;
-    b.pendingCancel = existing.pendingCancel;
-    if (existing.repeat === 'weekly') b.pendingRepeat = false;
-  } else {
-    if (b && b.repeat === 'weekly') return res.status(400).json({ error: 'Only admins can create repeating bookings.' });
-    if (b) { b.repeat = 'none'; b.repeatUntil = null; b.pendingCancel = false; }
-  }
-  // Signed-in members always book as themselves.
-  if (me && b) { b.name = me.name; b.email = me.email; }
-
-  const err = validateMemberBooking(b, s, existing);
+  if (b && b.id && db.getBooking(b.id)) return res.status(403).json({ error: 'That booking already exists — ask an admin to change it, or request to cancel it.' });
+  if (b && b.repeat === 'weekly') return res.status(400).json({ error: 'Only admins can create repeating bookings.' });
+  const err = validateMemberBooking(b, s, null);
   if (err) return res.status(400).json({ error: err });
-  if (!existing) b.admin = false;
+  // Only approved members with media membership can book; use their registered name.
+  const who = db.findMemberByEmail(b.email);
+  if (!who || !who.approved) return res.status(400).json({ error: 'Please select who this booking is for.' });
+  if (!who.mediaMember) return res.status(403).json({ error: 'Only media members can book. If you think you should be one, ask an admin.' });
+  b.name = who.name; b.email = who.email;
+  b.admin = false; b.repeat = 'none'; b.repeatUntil = null; b.pendingCancel = false;
 
   if (b.studio === 3) {
     const rErr = checkRoadshow(b);
@@ -366,7 +238,7 @@ app.post('/api/bookings', (req, res) => {
     const { start, end } = weekBounds(b.date);
     const used = db.djWeeklyMinutes(b.email, start, end, b.id);
     const overLimit = (used + dur) > s.djWeeklyCapMin;
-    if (overLimit && !(existing && sameSlot(existing, b) && !existing.pendingApproval)) {
+    if (overLimit) {
       if (!b.overrideRequest) {
         return res.status(400).json({
           error: 'That would put you over the ' + (s.djWeeklyCapMin / 60) + '-hour weekly DJ limit (' + (used / 60) + 'h already booked this week). You can request an admin override instead.',
@@ -378,15 +250,6 @@ app.post('/api/bookings', (req, res) => {
   }
   b.pendingApproval = pendingApproval;
   res.json(db.upsertBooking(b));
-});
-app.delete('/api/bookings/:id', (req, res) => {
-  const existing = db.getBooking(req.params.id);
-  if (!existing) return res.status(404).json({ error: 'Not found.' });
-  const me = currentMember(req, res);
-  if (!me) return res.status(401).json({ error: 'Log in to cancel your booking.' });
-  if (!ownsBooking(me, existing)) return res.status(403).json({ error: 'You can only cancel your own bookings.' });
-  db.deleteBooking(existing.id);
-  res.json({ ok: true });
 });
 app.post('/api/bookings/:id/request-cancel', (req, res) => {
   const existing = db.getBooking(req.params.id);
