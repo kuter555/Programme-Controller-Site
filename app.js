@@ -83,7 +83,7 @@
         modal: null, form: null, formError: '', saving: false, canOverride: false,
         registering: false, regName: '', regEmail: '', regError: '', regBusy: false, regSubmitted: false,
         loginPass: '', loginError: '', loginBusy: false, reauth: false,
-        crop: null, iconUploading: false, fullWeek: false,
+        crop: null, iconUploading: false, fullWeek: !!LOCKED_STUDIO,
         settingsDraft: null, settingsMsg: '', settingsBusy: false,
         newItemName: '', newItemNotes: '', itemEdit: null, itemMsg: '',
         dbReady: false, dbError: '',
@@ -153,6 +153,7 @@
         this._mq = mq;
       } catch (e) {}
       this._onResize = function () { if (this.state.fullWeek) this.forceUpdate(); }.bind(this);
+      if (this.state.fullWeek) document.body.style.overflow = 'hidden';
       window.addEventListener('resize', this._onResize);
       // Admin-only lists are fetched afterwards, and only if this browser is signed in as admin.
       Promise.all([this.dbFetchBookings(), this.dbFetchMembers(), this.dbCheckAdminSession(), Promise.resolve([]), this.dbFetchSettings(), this.dbFetchEquipment(), this.dbFetchCategories()])
@@ -169,7 +170,9 @@
         }.bind(this));
     }
     postHeight() {
-      if (MODE !== 'view' || window.parent === window) return;
+      // The full-week view fills whatever frame it's given (it's pinned to the window,
+      // so the page itself is ~0px tall) — let the host's own iframe height stand.
+      if (MODE !== 'view' || window.parent === window || this.state.fullWeek) return;
       var ht = document.documentElement.scrollHeight;
       if (ht === this._lastHeight) return;
       this._lastHeight = ht;
@@ -997,7 +1000,8 @@
             h('div', { className: 'urb-fw-week' }, this.weekLabelText())
           ),
           h('button', { className: 'btn btn-icon', onClick: this.nextWeek.bind(this), 'aria-label': 'Next week' }, '›'),
-          h('button', { className: 'btn btn-sm', onClick: function () { this.setState({ fullWeek: false }); }.bind(this) }, 'Close')
+          // The single-studio embed is always this view, so there's nothing to close.
+          LOCKED_STUDIO ? null : h('button', { className: 'btn btn-sm', onClick: function () { this.setState({ fullWeek: false }); }.bind(this) }, 'Close')
         ),
         h('div', { className: 'urb-fw-head' },
           h('div', { className: 'urb-fw-gutter' }),
@@ -1730,7 +1734,8 @@
         return h('div', { className: 'urb-page urb-mode-view' + (LOCKED_STUDIO ? ' urb-single' : '') },
           h('div', { className: 'urb-wrap' },
             this.state.dbError ? h('div', { className: 'db-banner error' }, this.state.dbError) : null,
-            this.renderSchedule(studio)
+            // The single-studio embed shows only the full-week view (rendered with the overlays below).
+            LOCKED_STUDIO ? null : this.renderSchedule(studio)
           ),
           overlays
         );
