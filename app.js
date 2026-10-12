@@ -352,7 +352,7 @@
       });
     }
     setField(k, v) { this.setState(function (s) { var f = Object.assign({}, s.form); f[k] = v; return { form: f }; }); }
-    closeModal() { this.setState({ modal: null, form: null, formError: '', registering: false, regSubmitted: false, saving: false, viewBooking: null, canOverride: false, crop: null }); }
+    closeModal() { this.setState({ modal: null, form: null, formError: '', viewNotice: '', registering: false, regSubmitted: false, saving: false, viewBooking: null, canOverride: false, crop: null }); }
 
     selectMember(idStr) {
       var m = this.memberChoices().filter(function (x) { return String(x.id) === String(idStr); })[0];
@@ -536,6 +536,114 @@
       api('POST', '/api/admin/bookings/' + encodeURIComponent(id) + '/approve-override').then(function (saved) {
         this.persist(this.state.bookings.map(function (x) { return x.id === id ? saved : x; }));
       }.bind(this)).catch(function (e) { this.flashAdminError('Could not approve: ' + e.message); }.bind(this));
+    }
+    /* ---------- change requests (name / description / image / time) ---------- */
+    // Starts from what's already pending, if anything, so people can tweak their request.
+    openChangeRequest(b) {
+      var c = b.pendingChange || {};
+      var pick = function (k) { return c[k] !== undefined ? c[k] : b[k]; };
+      this.setState({
+        modal: 'change', formError: '', viewNotice: '', canOverride: false,
+        form: {
+          id: b.id, studio: b.studio, repeat: b.repeat, repeatUntil: b.repeatUntil, category: b.category, items: [],
+          title: pick('title'), description: pick('description') || '', icon: pick('icon') || null,
+          date: pick('date'), startMin: pick('startMin'), endMin: pick('endMin'), note: c.note || '',
+          orig: { date: b.date, startMin: b.startMin, endMin: b.endMin, repeat: b.repeat }
+        }
+      });
+    }
+    submitChangeRequest() {
+      var f = this.state.form;
+      if (!f.title.trim()) return this.setState({ formError: 'The show needs a name.' });
+      if (f.endMin <= f.startMin) return this.setState({ formError: 'End time must be after start time.' });
+      if (this.slotChanged(f)) {
+        var clash = this.findClash(f);
+        if (clash) {
+          var cd = this.parse(clash.date);
+          return this.setState({ formError: 'That time overlaps “' + clash.booking.title + '” on ' + DAYS[(cd.getDay() + 6) % 7] + ' ' + cd.getDate() + '/' + (cd.getMonth() + 1) + ', ' + this.rangeLabel(clash.booking) + '. Pick another slot.' });
+        }
+      }
+      this.setState({ saving: true, formError: '' });
+      api('POST', '/api/bookings/' + encodeURIComponent(f.id) + '/request-change', {
+        title: f.title.trim(), description: f.description.trim(), icon: f.icon || null,
+        date: f.date, startMin: f.startMin, endMin: f.endMin, note: (f.note || '').trim()
+      }).then(function (saved) {
+        this.setState(function (s) {
+          return {
+            saving: false, modal: 'view', form: null, viewBooking: saved,
+            viewNotice: 'Thanks — your changes have been sent to the admins. The schedule will update once they approve them.',
+            bookings: s.bookings.map(function (x) { return x.id === saved.id ? saved : x; })
+          };
+        });
+      }.bind(this)).catch(function (e) {
+        this.setState({ saving: false, formError: e.message || 'Could not send your request.' });
+      }.bind(this));
+    }
+    renderChangeModal() {
+      var f = this.state.form;
+      var b = this.state.bookings.find(function (x) { return x.id === f.id; }) || {};
+      return h('div', { className: 'urb-overlay urb-fade', onClick: this.closeModal.bind(this) },
+        h('div', { className: 'urb-card urb-pop', onClick: function (e) { e.stopPropagation(); } },
+          h('div', { className: 'urb-card-head' },
+            h('span', null, '✎'),
+            h('div', { className: 'urb-card-head-title' }, 'Request changes'),
+            h('div', { style: { flex: 1 } }),
+            h('div', { style: { fontSize: '12px', fontWeight: 600, color: '#9cceff' } }, STUDIO_NAMES[f.studio])
+          ),
+          h('div', { className: 'urb-card-body' },
+            h('div', { className: 'urb-row-sub', style: { marginBottom: '12px' } }, 'Change anything below and send it to the admins. Nothing changes on the schedule until they approve it.'),
+            h('div', { className: 'urb-field' }, this.labelEl('Show name'), this.input({ value: f.title, onChange: function (e) { this.setField('title', e.target.value); }.bind(this) })),
+            this.renderIconField(f),
+            h('div', { className: 'urb-field' }, this.labelEl('Description'), h('textarea', { className: 'urb-textarea', value: f.description, rows: 3, placeholder: 'What’s the show about?', onChange: function (e) { this.setField('description', e.target.value); }.bind(this) })),
+            h('div', { className: 'urb-field' },
+              this.labelEl('Time'),
+              f.repeat === 'weekly' ? h('div', { className: 'urb-row-sub', style: { marginBottom: '8px' } }, '↻ This is a weekly slot. To move it, set the start date to the first week it should move — earlier weeks stay as they are.') : null,
+              this.renderRangeFields(f)
+            ),
+            h('div', { className: 'urb-field' }, this.labelEl('Note for the admins (optional)'), h('textarea', { className: 'urb-textarea', value: f.note, rows: 2, maxLength: 300, placeholder: 'e.g. who you are, or why the change', onChange: function (e) { this.setField('note', e.target.value); }.bind(this) })),
+            this.state.formError ? h('div', { className: 'urb-error-box' }, this.state.formError) : null,
+            h('div', { className: 'urb-actions' },
+              h('button', { className: this.btnClass('ghost'), onClick: function () { this.setState({ modal: 'view', viewBooking: b, form: null, formError: '' }); }.bind(this) }, 'Back'),
+              h('div', { style: { flex: 1 } }),
+              h('button', { className: this.btnClass('primary'), disabled: this.state.saving || this.state.iconUploading, onClick: this.submitChangeRequest.bind(this) }, this.state.saving ? 'Sending…' : 'Send for approval')
+            )
+          )
+        )
+      );
+    }
+    pendingChanges() { return this.state.bookings.filter(function (b) { return !!b.pendingChange; }); }
+    // Human-readable list of what a request would change.
+    changeSummary(b) {
+      var c = b.pendingChange, out = [];
+      var when = function (x) {
+        var d = this.parse(x.date);
+        return (b.repeat === 'weekly' ? 'weekly from ' : '') + DAYS[(d.getDay() + 6) % 7] + ' ' + d.getDate() + '/' + (d.getMonth() + 1) + ' ' + this.rangeLabel(x);
+      }.bind(this);
+      if (c.title !== b.title) out.push(h('div', { key: 't' }, h('b', null, 'Name: '), '“' + b.title + '” → “' + c.title + '”'));
+      if (c.date !== b.date || c.startMin !== b.startMin || c.endMin !== b.endMin) out.push(h('div', { key: 'w' }, h('b', null, 'Time: '), when(b) + ' → ' + when(c)));
+      if ((c.description || '') !== (b.description || '')) out.push(h('div', { key: 'd' }, h('b', null, 'Description: '), c.description ? '“' + (c.description.length > 160 ? c.description.slice(0, 160) + '…' : c.description) + '”' : '(removed)'));
+      if ((c.icon || null) !== (b.icon || null)) out.push(h('div', { key: 'i', className: 'urb-change-icons' }, h('b', null, 'Image: '),
+        b.icon ? h('img', { src: b.icon, alt: 'current' }) : h('span', null, 'none'), ' → ',
+        c.icon ? h('img', { src: c.icon, alt: 'requested' }) : h('span', null, 'removed')));
+      if (c.note) out.push(h('div', { key: 'n', className: 'urb-change-note' }, 'Note: ' + c.note));
+      return out;
+    }
+    approveChange(b) {
+      var c = b.pendingChange;
+      var moved = c.date !== b.date || c.startMin !== b.startMin || c.endMin !== b.endMin;
+      if (moved) {
+        var clash = this.findClash(Object.assign({}, b, { date: c.date, startMin: c.startMin, endMin: c.endMin, repeatRequest: false }));
+        if (clash && !window.confirm('The new time overlaps “' + clash.booking.title + '”. Approve anyway?')) return;
+      }
+      api('POST', '/api/admin/bookings/' + encodeURIComponent(b.id) + '/approve-change').then(function () {
+        return this.dbFetchBookings();
+      }.bind(this)).then(function (list) { this.persist(list); }.bind(this))
+        .catch(function (e) { this.flashAdminError('Could not approve: ' + e.message); }.bind(this));
+    }
+    denyChange(b) {
+      api('POST', '/api/admin/bookings/' + encodeURIComponent(b.id) + '/deny-change').then(function (saved) {
+        this.persist(this.state.bookings.map(function (x) { return x.id === saved.id ? saved : x; }));
+      }.bind(this)).catch(function (e) { this.flashAdminError('Could not deny: ' + e.message); }.bind(this));
     }
     denyOverride(id) {
       api('POST', '/api/admin/bookings/' + encodeURIComponent(id) + '/deny-override').then(function () {
@@ -872,6 +980,7 @@
       if (MODE !== 'view') {
         if (b.pendingRepeat) meta.push(h('span', { key: 'p', title: 'Awaiting approval' }, '⏳'));
         if (b.pendingCancel) meta.push(h('span', { key: 'x', title: 'Cancellation requested' }, '🚫'));
+        if (b.pendingChange) meta.push(h('span', { key: 'c', title: 'Change requested — awaiting approval' }, '✎'));
         if (locked) meta.push(h('span', { key: 'l', title: 'Admin booking' }, '🔒'));
       }
       var children = [
@@ -1107,6 +1216,7 @@
     renderModal() {
       if (!this.state.modal) return null;
       if (this.state.modal === 'view') return this.renderViewModal();
+      if (this.state.modal === 'change') return this.renderChangeModal();
       if (this.state.modal === 'login') return this.renderLogin(this.closeModal.bind(this));
 
       var f = this.state.form;
@@ -1379,9 +1489,12 @@
               b.repeat === 'weekly' ? h('span', { className: 'urb-row-sub' }, '↻ Weekly slot') : null,
               b.admin ? h('span', { className: 'urb-row-sub' }, '🔒 Admin booking') : null
             ),
+            MODE !== 'view' && b.pendingChange ? h('div', { className: 'urb-hint-box' }, '✎ A change to this show is waiting for admin approval. Sending another request replaces it.') : null,
+            this.state.viewNotice ? h('div', { className: 'urb-ok-box' }, this.state.viewNotice) : null,
             this.state.formError ? h('div', { className: 'urb-error-box' }, this.state.formError) : null,
             h('div', { className: 'urb-actions' },
               h('button', { className: this.btnClass('ghost', true), onClick: this.closeModal.bind(this) }, 'Close'),
+              MODE === 'view' || b.studio === 3 ? null : h('button', { className: this.btnClass('primary', true), onClick: function () { this.openChangeRequest(b); }.bind(this) }, 'Request changes'),
               MODE === 'view' ? null : b.pendingCancel
                 ? h('button', { className: this.btnClass('ghost', true), disabled: true }, 'Cancellation requested')
                 : h('button', { className: this.btnClass('danger', true), disabled: this.state.saving, onClick: function () { this.requestCancel(b.id); }.bind(this) }, 'Request to cancel')
@@ -1396,6 +1509,17 @@
       var reqs = this.pendingRequests();
       var cancels = this.pendingCancellations();
       var overrides = this.pendingOverrides();
+      var changes = this.pendingChanges();
+      var changeRow = function (b) {
+        return h('div', { key: b.id, className: 'urb-req-row' },
+          h('div', { style: { flex: 1, minWidth: 0 } },
+            h('div', { className: 'urb-row-title' }, b.title + ' — ' + STUDIO_NAMES[b.studio]),
+            h('div', { className: 'urb-row-sub urb-change-list' }, this.changeSummary(b))
+          ),
+          h('button', { className: this.btnClass('primary'), onClick: function () { this.approveChange(b); }.bind(this) }, 'Approve'),
+          h('button', { className: this.btnClass('danger'), onClick: function () { this.denyChange(b); }.bind(this) }, 'Deny')
+        );
+      }.bind(this);
       var pendingMembers = this.state.pendingMembers;
       var reqRow = function (b) {
         return h('div', { key: b.id, className: 'urb-req-row' },
@@ -1443,7 +1567,8 @@
         ['Pending member registrations', 'Member registrations', pendingMembers, pendingMemberRow],
         ['Pending weekly requests', 'Weekly requests', reqs, reqRow],
         ['Pending DJ limit overrides', 'DJ limit overrides', overrides, overrideRow],
-        ['Pending cancellations', 'Cancellations', cancels, cancelRow]
+        ['Pending cancellations', 'Cancellations', cancels, cancelRow],
+        ['Pending show changes', 'Show changes', changes, changeRow]
       ];
       var full = sections.filter(function (sec) { return sec[2].length; });
       var empty = sections.filter(function (sec) { return !sec[2].length; });

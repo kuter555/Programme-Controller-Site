@@ -74,6 +74,9 @@ if (!existingCols.includes('pending_approval')) db.exec("ALTER TABLE bookings AD
 // Roadshow (studio 3) bookings reserve equipment rather than a room: JSON array of equipment ids.
 if (!existingCols.includes('items')) db.exec("ALTER TABLE bookings ADD COLUMN items TEXT");
 // Show type (flagship, training, …) — drives the booking's colour on the grid.
+// A member's proposed edit (name/description/image/time) waiting for admin approval, as JSON.
+// Kept separate from the live fields so the schedule doesn't change until it's approved.
+if (!existingCols.includes('pending_change')) db.exec("ALTER TABLE bookings ADD COLUMN pending_change TEXT");
 if (!existingCols.includes('category')) {
   db.exec("ALTER TABLE bookings ADD COLUMN category TEXT");
   // The old podcast checkbox became the "Podcast recording" show type.
@@ -211,6 +214,10 @@ function updateEquipment(id, fields) {
 function deleteEquipment(id) { db.prepare('DELETE FROM equipment WHERE id = ?').run(id); }
 
 /* ---------- row <-> API object mapping ---------- */
+function parseJson(raw) {
+  if (!raw) return null;
+  try { return JSON.parse(raw); } catch (e) { return null; }
+}
 function parseItems(raw) {
   if (!raw) return [];
   try { const v = JSON.parse(raw); return Array.isArray(v) ? v.filter(Number.isInteger) : []; } catch (e) { return []; }
@@ -223,7 +230,8 @@ function rowToBooking(r) {
     startMin: r.start_min, endMin: r.end_min, repeatUntil: r.repeat_until || null,
     isPodcast: !!r.is_podcast, pendingCancel: !!r.pending_cancel,
     pendingApproval: !!r.pending_approval, icon: r.icon || null,
-    items: parseItems(r.items), category: r.category || null
+    items: parseItems(r.items), category: r.category || null,
+    pendingChange: parseJson(r.pending_change)
   };
 }
 function rowToMember(r) {
@@ -263,6 +271,8 @@ function upsertBooking(b) {
 }
 function deleteBooking(id) { db.prepare('DELETE FROM bookings WHERE id = ?').run(id); }
 function setPendingCancel(id, value) { db.prepare('UPDATE bookings SET pending_cancel = ? WHERE id = ?').run(value ? 1 : 0, id); }
+// Not touched by upsertBooking, so an admin editing a booking doesn't silently drop a member's request.
+function setPendingChange(id, change) { db.prepare('UPDATE bookings SET pending_change = ? WHERE id = ?').run(change ? JSON.stringify(change) : null, id); }
 
 // Sum of minutes already booked by this member as one-off (non-weekly) Studio Two
 // slots within [weekStartDate, weekEndDate], excluding a given booking id (for edits)
@@ -360,7 +370,7 @@ module.exports = {
   createSession, getSessionExpiry, extendSession, deleteSession, purgeExpiredSessions,
   getSettings, saveSettings,
   listEquipment, getEquipment, addEquipment, updateEquipment, deleteEquipment,
-  listBookings, getBooking, upsertBooking, deleteBooking, setPendingCancel, djWeeklyMinutes, roadshowConflicts,
+  listBookings, getBooking, upsertBooking, deleteBooking, setPendingCancel, setPendingChange, djWeeklyMinutes, roadshowConflicts,
   listApprovedMembers, listPendingMembers, findMemberByEmail, insertMember, approveMember, deleteMember,
   getMember, setMediaMember,
   listCategories, categoryExists, addCategory, updateCategory, deleteCategory, moveCategory

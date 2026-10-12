@@ -243,21 +243,30 @@ function validateMemberBooking(b, s, existing) {
   if (b.admin && !existing) return 'Only admins can create locked bookings.';
   if (b.icon && !ICON_PATH_RE.test(b.icon)) b.icon = null;
   if (!sameSlot(existing, b)) {
-    if (daysFromToday(b.date) < 0) return 'You can’t book a date in the past.';
-    if (s.maxAdvanceDays && daysFromToday(b.date) > s.maxAdvanceDays) return 'Bookings can only be made up to ' + s.maxAdvanceDays + ' days ahead.';
-    const dur = b.endMin - b.startMin;
-    if (b.studio === 1) {
-      if (b.endMin > 1440) return 'Radio shows must finish by midnight.';
-      if (b.startMin % 60 !== 10) return 'Radio shows start 10 minutes past the hour.';
-      if (dur % 60 !== 0 || dur < 60 || dur > s.radioMaxHours * 60) return 'Radio shows run for 1 to ' + s.radioMaxHours + ' hours.';
-    } else if (b.studio === 2) {
-      if (b.endMin > 1440) return 'DJ slots must finish by midnight.';
-      if (dur < s.djMinSlotMin || dur > s.djMaxSlotMin) return 'DJ slots must be between ' + s.djMinSlotMin + ' and ' + s.djMaxSlotMin + ' minutes.';
-    } else if (dur > s.roadshowMaxDays * 1440) {
-      return 'Roadshow bookings can last at most ' + s.roadshowMaxDays + ' days.';
-    }
+    const slotErr = validateSlot(b, s);
+    if (slotErr) return slotErr;
   }
   return checkCategory(b, true);
+}
+// Member rules for *when* a booking (or a requested move) can be: not in the past,
+// within the book-ahead window, and the per-studio length limits.
+function validateSlot(b, s) {
+  if (!b.date || !DATE_RE.test(b.date) || !Number.isFinite(b.startMin) || !Number.isFinite(b.endMin)) return 'Invalid booking time.';
+  if (b.startMin < 0 || b.startMin >= 1440 || b.endMin <= b.startMin) return 'End time must be after start time.';
+  if (daysFromToday(b.date) < 0) return 'You can’t book a date in the past.';
+  if (s.maxAdvanceDays && daysFromToday(b.date) > s.maxAdvanceDays) return 'Bookings can only be made up to ' + s.maxAdvanceDays + ' days ahead.';
+  const dur = b.endMin - b.startMin;
+  if (b.studio === 1) {
+    if (b.endMin > 1440) return 'Radio shows must finish by midnight.';
+    if (b.startMin % 60 !== 10) return 'Radio shows start 10 minutes past the hour.';
+    if (dur % 60 !== 0 || dur < 60 || dur > s.radioMaxHours * 60) return 'Radio shows run for 1 to ' + s.radioMaxHours + ' hours.';
+  } else if (b.studio === 2) {
+    if (b.endMin > 1440) return 'DJ slots must finish by midnight.';
+    if (dur < s.djMinSlotMin || dur > s.djMaxSlotMin) return 'DJ slots must be between ' + s.djMinSlotMin + ' and ' + s.djMaxSlotMin + ' minutes.';
+  } else if (dur > s.roadshowMaxDays * 1440) {
+    return 'Roadshow bookings can last at most ' + s.roadshowMaxDays + ' days.';
+  }
+  return null;
 }
 app.post('/api/bookings', (req, res) => {
   const b = req.body;
@@ -300,6 +309,35 @@ app.post('/api/bookings', (req, res) => {
   }
   b.pendingApproval = pendingApproval;
   res.json(db.upsertBooking(b));
+});
+// Anyone on /book can propose a new name, description, image or time for a show.
+// Nothing changes on the schedule until an admin approves it; a newer request
+// for the same show replaces the older one.
+app.post('/api/bookings/:id/request-change', (req, res) => {
+  const existing = db.getBooking(req.params.id);
+  if (!existing) return res.status(404).json({ error: 'Not found.' });
+  if (existing.studio === 3) return res.status(400).json({ error: 'Roadshow bookings can’t be changed this way — ask an admin.' });
+  const body = req.body || {};
+  const proposed = {
+    title: body.title != null ? String(body.title).trim().slice(0, 120) : existing.title,
+    description: body.description != null ? String(body.description).trim().slice(0, 2000) : existing.description,
+    icon: body.icon === null ? null : (body.icon != null ? String(body.icon) : existing.icon),
+    date: body.date != null ? String(body.date) : existing.date,
+    startMin: body.startMin != null ? Number(body.startMin) : existing.startMin,
+    endMin: body.endMin != null ? Number(body.endMin) : existing.endMin
+  };
+  if (!proposed.title) return res.status(400).json({ error: 'The show needs a name.' });
+  if (proposed.icon && !ICON_PATH_RE.test(proposed.icon)) return res.status(400).json({ error: 'That image couldn’t be used — try uploading it again.' });
+  const moved = !sameSlot(existing, Object.assign({}, existing, proposed));
+  if (moved) {
+    const err = validateSlot(Object.assign({}, existing, proposed), db.getSettings());
+    if (err) return res.status(400).json({ error: err });
+  }
+  const changed = moved || proposed.title !== existing.title || proposed.description !== (existing.description || '') || (proposed.icon || null) !== (existing.icon || null);
+  if (!changed) return res.status(400).json({ error: 'Nothing has been changed yet.' });
+  const note = String(body.note || '').trim().slice(0, 300);
+  db.setPendingChange(existing.id, Object.assign(proposed, { note, requestedAt: new Date().toISOString() }));
+  res.json(db.getBooking(existing.id));
 });
 app.post('/api/bookings/:id/request-cancel', (req, res) => {
   const existing = db.getBooking(req.params.id);
@@ -353,6 +391,35 @@ app.post('/api/admin/bookings/:id/approve-override', requireAdmin, (req, res) =>
   res.json(db.upsertBooking(b));
 });
 app.post('/api/admin/bookings/:id/deny-override', requireAdmin, (req, res) => { db.deleteBooking(req.params.id); res.json({ ok: true }); });
+
+// Apply a member's requested change. Moving a weekly show to a later date splits
+// the series: earlier weeks keep the old details, the new series starts on the
+// requested date — so past weeks on the schedule aren't rewritten.
+app.post('/api/admin/bookings/:id/approve-change', requireAdmin, (req, res) => {
+  const b = db.getBooking(req.params.id);
+  if (!b) return res.status(404).json({ error: 'Not found.' });
+  const c = b.pendingChange;
+  if (!c) return res.status(400).json({ error: 'There’s no change waiting for this show.' });
+  const updated = Object.assign({}, b, { title: c.title, description: c.description, icon: c.icon || null, date: c.date, startMin: c.startMin, endMin: c.endMin });
+  const splitSeries = b.repeat === 'weekly' && c.date > b.date && !sameSlot(b, updated) &&
+    (!b.repeatUntil || b.repeatUntil >= c.date);
+  if (splitSeries) {
+    const old = Object.assign({}, b, { repeatUntil: shiftDate(c.date, -1) });
+    db.upsertBooking(old);
+    updated.id = 'b' + Date.now() + crypto.randomBytes(2).toString('hex');
+    updated.pendingCancel = false;
+    db.upsertBooking(updated);
+  } else {
+    db.upsertBooking(updated);
+  }
+  db.setPendingChange(b.id, null);
+  res.json({ ok: true, split: splitSeries });
+});
+app.post('/api/admin/bookings/:id/deny-change', requireAdmin, (req, res) => {
+  if (!db.getBooking(req.params.id)) return res.status(404).json({ error: 'Not found.' });
+  db.setPendingChange(req.params.id, null);
+  res.json(db.getBooking(req.params.id));
+});
 
 app.get('/api/admin/members', requireAdmin, (req, res) => res.json(db.listApprovedMembers()));
 // Spreadsheet export of approved members: name and username (the part before @).

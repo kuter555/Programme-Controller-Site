@@ -399,3 +399,13 @@ input[type="date"].urb-input::-webkit-date-and-time-value{text-align:left;margin
 @media (min-width:760px){ .urb-mode-view .urb-wrap{padding:12px 12px 16px;} }
 .urb-mode-view .urb-tabs{margin-top:0;}
 .urb-mode-view .urb-day-col,.urb-mode-view .urb-rs-cell{cursor:default;}
+
+/* change requests */
+.urb-hint-box{font-size:12.5px;color:var(--dim);background:var(--chip);border:1px solid var(--border);border-radius:9px;padding:9px 11px;margin-bottom:12px;line-height:1.4;}
+.urb-ok-box{font-size:12.5px;font-weight:600;color:#1f7a44;background:#e3f6ea;border:1px solid #9fd9b4;border-radius:9px;padding:9px 11px;margin-bottom:12px;line-height:1.4;}
+:root[data-theme="dark"] .urb-ok-box{color:#7fdca3;background:rgba(46,158,79,.15);border-color:#2e6b44;}
+.urb-change-list{display:flex;flex-direction:column;gap:3px;margin-top:4px;line-height:1.35;overflow-wrap:anywhere;}
+.urb-change-list b{color:var(--text);font-weight:700;}
+.urb-change-icons{display:flex;align-items:center;gap:6px;flex-wrap:wrap;}
+.urb-change-icons img{width:34px;height:34px;border-radius:6px;object-fit:cover;border:1px solid var(--border);}
+.urb-change-note{font-style:italic;}
