@@ -69,6 +69,8 @@ const smallJson = express.json();
 const iconJson = express.json({ limit: '3mb' });
 app.use((req, res, next) => (req.path === '/api/icon' ? iconJson : smallJson)(req, res, next));
 app.use(cookieParser());
+// The Listen Live widget runs on other sites: let them load our fonts, images and "on now" feed.
+app.use(['/fonts', '/assets', '/uploads', '/api/now'], (req, res, next) => { res.set('Access-Control-Allow-Origin', '*'); next(); });
 app.use('/uploads', express.static(uploadsDir));
 app.use('/data', (req, res) => res.status(404).end()); // never serve the database folder
 app.use(express.static(__dirname, { index: 'index.html', dotfiles: 'deny' }));
@@ -136,6 +138,54 @@ function checkRoadshow(b) {
   b.icon = null;
   return null;
 }
+
+/* ---------- "on now" for the Listen Live widget ---------- */
+// Bookings are stored in UK local time, so work out "now" in Europe/London
+// rather than trusting the server's own clock/timezone.
+function londonNow() {
+  const parts = {};
+  new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/London', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })
+    .formatToParts(new Date()).forEach(p => { parts[p.type] = p.value; });
+  return { date: parts.year + '-' + parts.month + '-' + parts.day, min: Number(parts.hour) * 60 + Number(parts.minute) };
+}
+function dayIndex(ds) { const p = ds.split('-').map(Number); return Math.round(Date.UTC(p[0], p[1] - 1, p[2]) / 86400000); }
+function shiftDate(ds, n) { const d = new Date(Date.UTC(...ds.split('-').map((v, i) => i === 1 ? v - 1 : +v)) + n * 86400000); return d.toISOString().slice(0, 10); }
+// Does booking b have an instance starting on date ds? (mirrors startsOn in app.js)
+function startsOn(b, ds) {
+  if (b.repeat === 'weekly') return ds >= b.date && (!b.repeatUntil || ds <= b.repeatUntil) && (dayIndex(ds) - dayIndex(b.date)) % 7 === 0;
+  return b.date === ds;
+}
+// Studio One instances touching the window [today - 1 day, today + 1 day], as absolute minutes.
+function radioInstances(today) {
+  const out = [];
+  db.listBookings().filter(b => b.studio === 1 && !b.pendingApproval).forEach(b => {
+    const span = Math.max(0, Math.ceil(b.endMin / 1440) - 1);
+    for (let k = -1 - span; k <= 1; k++) {
+      const ds = shiftDate(today, k);
+      if (startsOn(b, ds)) out.push({ b, start: dayIndex(ds) * 1440 + b.startMin, end: dayIndex(ds) * 1440 + b.endMin });
+    }
+  });
+  return out.sort((x, y) => x.start - y.start);
+}
+function showInfo(inst) {
+  const b = inst.b;
+  const cat = b.category ? db.listCategories().find(c => c.key === b.category) : null;
+  const hhmm = m => { m = ((m % 1440) + 1440) % 1440; return String(Math.floor(m / 60)).padStart(2, '0') + ':' + String(m % 60).padStart(2, '0'); };
+  return {
+    title: b.title, presenter: b.name, start: hhmm(inst.start), end: hhmm(inst.end),
+    image: b.icon || null, category: cat ? cat.label : null, color: cat ? cat.color : null
+  };
+}
+app.get('/api/now', (req, res) => {
+  const now = londonNow();
+  const t = dayIndex(now.date) * 1440 + now.min;
+  const list = radioInstances(now.date);
+  const live = list.find(i => i.start <= t && t < i.end);
+  const next = list.find(i => i.start > t && i.start - t <= 24 * 60);
+  res.set('Cache-Control', 'public, max-age=30');
+  // Public: no presenter emails. Image paths are relative to this site; the widget resolves them.
+  res.json({ live: live ? showInfo(live) : null, next: next ? showInfo(next) : null, logo: '/assets/logo.png' });
+});
 
 /* ---------- public read endpoints ---------- */
 app.get('/api/bookings', (req, res) => res.json(db.listBookings()));
