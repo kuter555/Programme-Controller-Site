@@ -56,11 +56,12 @@
     /* square artwork on the left: as tall as the player, always square */
     '.art{position:relative;flex:none;align-self:stretch;width:96px;background:var(--art-bg);}',
     '.art img{position:absolute;inset:0;display:block;width:100%;height:100%;object-fit:cover;}',
-    '.art img.logo{object-fit:contain;padding:6%;box-sizing:border-box;}',
+    /* the fallback logo is a full-bleed square tile, so it fills the square like show artwork */
+    '.art img.logo{object-fit:cover;}',
     /* play/pause sits in the corner so the artwork stays visible */
     '.play{position:absolute;inset:0;display:flex;align-items:flex-end;justify-content:flex-end;padding:6px;transition:background .15s;}',
     '.card:hover .play{background:rgba(84,47,123,.10);}',
-    '.btn{width:34px;height:34px;border-radius:50%;background:var(--brand);display:flex;align-items:center;justify-content:center;box-shadow:0 2px 6px rgba(0,0,0,.3);transition:transform .12s;}',
+    '.btn{width:34px;height:34px;border-radius:50%;background:var(--brand);display:flex;align-items:center;justify-content:center;box-shadow:0 0 0 2px rgba(255,255,255,.9),0 2px 6px rgba(0,0,0,.35);transition:transform .12s;}',
     '.card.dark .btn{background:#7b4fb0;}',
     '.card:hover .btn{transform:scale(1.08);}',
     '.btn svg{width:16px;height:16px;fill:#fff;}',
@@ -177,7 +178,7 @@
           title: live ? live.title : 'Automation Playlist',
           artist: live ? live.presenter : 'Curated by our URB DJs',
           album: 'URB live',
-          artwork: [{ src: live && live.image ? abs(live.image) : abs('/assets/listen-logo.png'), sizes: '512x512' }]
+          artwork: [{ src: live && live.image ? abs(live.image) : abs('/assets/listen-logo.png'), sizes: live && live.image ? '256x256' : '447x447' }]
         });
       } catch (e) {}
     }
