@@ -16,6 +16,7 @@
   if (window.__urbListenLiveLoaded) return;
   window.__urbListenLiveLoaded = true;
 
+  // Built-in fallback; the booking site's System page can change these, and /api/now sends the current list.
   var STREAMS = [
     'https://urb-ice.bath.ac.uk/urb/320.mp3',
     'https://urb-ice.bath.ac.uk/urb/128.mp3' // fallback if the 320 mount fails
@@ -199,7 +200,11 @@
       x.open('GET', origin + '/api/now');
       x.onload = function () {
         if (x.status !== 200) return;
-        try { now = JSON.parse(x.responseText); render(); } catch (e) {}
+        try {
+          now = JSON.parse(x.responseText);
+          if (now.streams && now.streams.length && state === 'idle') STREAMS = now.streams;
+          render();
+        } catch (e) {}
       };
       x.send();
     }

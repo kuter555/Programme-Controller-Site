@@ -1,4 +1,6 @@
 'use strict';
+// Bookings are UK local times, so run the whole server on UK time whatever the machine is set to.
+process.env.TZ = 'Europe/London';
 require('dotenv').config();
 const path = require('path');
 const fs = require('fs');
@@ -6,13 +8,17 @@ const crypto = require('crypto');
 const express = require('express');
 const cookieParser = require('cookie-parser');
 const db = require('./db');
+const ops = require('./maintenance');
 
 const PORT = process.env.PORT || 3000;
 if (!process.env.ADMIN_PASSPHRASE) {
   console.error('ADMIN_PASSPHRASE is not set. Copy .env.example to .env and set one, then restart.');
   process.exit(1);
 }
-db.ensureAdminPassphrase(process.env.ADMIN_PASSPHRASE);
+if (db.ensureAdminPassphrase(process.env.ADMIN_PASSPHRASE)) {
+  db.setState('passphraseChangedAt', new Date().toISOString());
+  db.addAudit('system', 'admin.passphrase', 'Admin passphrase set from ADMIN_PASSPHRASE in .env — all admins were signed out');
+}
 
 const BATH_EMAIL_RE = /^[a-z0-9._%+-]+@bath\.ac\.uk$/i;
 const GENERIC_EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -56,7 +62,32 @@ function setSessionCookie(req, res, token) {
   res.cookie(SESSION_COOKIE, token, { httpOnly: true, sameSite: 'lax', secure: req.secure, maxAge: SESSION_TTL_MS });
 }
 
-function publicMember(m) { return m ? { id: m.id, name: m.name, email: m.email } : null; }
+function publicMember(m) { return m ? { id: m.id, name: m.name, email: m.email, ownerKey: ownerKey(m.email) } : null; }
+// Public pages get bookings without presenters' email addresses; this stable,
+// meaningless key still lets the booking form count a member's weekly DJ time.
+let ownerSecret = db.getState('ownerKeySecret');
+if (!ownerSecret) { ownerSecret = crypto.randomBytes(16).toString('hex'); db.setState('ownerKeySecret', ownerSecret); }
+function ownerKey(email) { return crypto.createHmac('sha256', ownerSecret).update(String(email || '').toLowerCase()).digest('hex').slice(0, 16); }
+
+/* ---------- activity log ---------- */
+function isAdminReq(req) { return isValidSession(req.cookies[SESSION_COOKIE]); }
+function memberActor(name, email) { return 'member: ' + (name || '?') + ' <' + (email || '?') + '>'; }
+function audit(actor, action, summary, details) {
+  try { db.addAudit(actor, action, summary, details); } catch (e) { console.error('audit failed', e); }
+}
+function bookingLabel(b) {
+  const hhmm = m => String(Math.floor((m % 1440) / 60)).padStart(2, '0') + ':' + String(m % 60).padStart(2, '0');
+  return '"' + b.title + '" (' + ({ 1: 'Studio One', 2: 'Studio Two', 3: 'Roadshow' }[b.studio] || 'studio ' + b.studio) + ', ' + b.date + ' ' + hhmm(b.startMin) + (b.repeat === 'weekly' ? ', weekly' : '') + ')';
+}
+// Which fields an edit changed, for the log.
+function bookingDiff(before, after) {
+  const out = {};
+  ['studio', 'title', 'name', 'email', 'description', 'date', 'startMin', 'endMin', 'repeat', 'repeatUntil', 'category', 'icon', 'items', 'admin'].forEach(k => {
+    const a = before ? before[k] : undefined, b = after[k];
+    if (JSON.stringify(a == null ? null : a) !== JSON.stringify(b == null ? null : b)) out[k] = [a == null ? null : a, b == null ? null : b];
+  });
+  return out;
+}
 setInterval(function () { db.purgeExpiredSessions(Date.now()); }, 10 * 60 * 1000).unref();
 
 const uploadsDir = path.join(__dirname, 'data', 'uploads');
@@ -72,8 +103,13 @@ app.use(cookieParser());
 // The Listen Live widget runs on other sites: let them load our fonts, images and "on now" feed.
 app.use(['/fonts', '/assets', '/uploads', '/api/now'], (req, res, next) => { res.set('Access-Control-Allow-Origin', '*'); next(); });
 app.use('/uploads', express.static(uploadsDir));
-app.use('/data', (req, res) => res.status(404).end()); // never serve the database folder
-app.use(express.static(__dirname, { index: 'index.html', dotfiles: 'deny' }));
+// Only the files the browser needs are public — never the server code, database, backups or notes.
+['assets', 'fonts', 'vendor'].forEach(d => app.use('/' + d, express.static(path.join(__dirname, d), { dotfiles: 'deny' })));
+['app.js', 'style.css', 'listen-live.js', 'system-panel.js'].forEach(f => app.get('/' + f, (req, res) => res.sendFile(path.join(__dirname, f))));
+app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'index.html')));
+app.get('/index.html', (req, res) => res.sendFile(path.join(__dirname, 'index.html')));
+// The System page: backups, data retention, the yearly reset, logs and health checks.
+app.get('/system', (req, res) => res.sendFile(path.join(__dirname, 'system.html')));
 // The same single-page app serves both addresses; it reads the path to decide what to
 // show: / = public view-only schedule (embeddable), /book = the full site incl. admin.
 app.get('/book', (req, res) => res.sendFile(path.join(__dirname, 'index.html')));
@@ -184,11 +220,21 @@ app.get('/api/now', (req, res) => {
   const next = list.find(i => i.start > t && i.start - t <= 24 * 60);
   res.set('Cache-Control', 'public, max-age=30');
   // Public: no presenter emails. Image paths are relative to this site; the widget resolves them.
-  res.json({ live: live ? showInfo(live) : null, next: next ? showInfo(next) : null, logo: '/assets/listen-logo.png' });
+  res.json({ live: live ? showInfo(live) : null, next: next ? showInfo(next) : null, logo: '/assets/listen-logo.png', streams: ops.config().streams });
+});
+// For uptime monitors (e.g. UptimeRobot) and the System page's own DNS check.
+app.get('/api/health', (req, res) => {
+  let ok = true;
+  try { db.raw.prepare('SELECT 1').get(); } catch (e) { ok = false; }
+  res.set('Cache-Control', 'no-store');
+  res.status(ok ? 200 : 503).json({ ok, instance: ops.INSTANCE_ID, time: new Date().toISOString() });
 });
 
 /* ---------- public read endpoints ---------- */
-app.get('/api/bookings', (req, res) => res.json(db.listBookings()));
+app.get('/api/bookings', (req, res) => {
+  const admin = isAdminReq(req);
+  res.json(db.listBookings().map(b => Object.assign(b, { ownerKey: ownerKey(b.email) }, admin ? {} : { email: '' })));
+});
 // Feeds the /book "who is this booking for?" dropdown — only media members can book.
 app.get('/api/members', (req, res) => res.json(db.listApprovedMembers().filter(m => m.mediaMember).map(publicMember)));
 app.get('/api/settings', (req, res) => res.json(db.getSettings()));
@@ -209,7 +255,9 @@ app.post('/api/members', (req, res) => {
       : 'That email is registered but doesn’t have media membership yet — ask an admin to switch it on.' });
   }
   try {
-    res.status(201).json(publicMember(db.insertMember(name, email)));
+    const m = db.insertMember(name, email);
+    audit(memberActor(name, email), 'member.register', name + ' registered (awaiting approval)');
+    res.status(201).json(publicMember(m));
   } catch (e) {
     if (String(e.message).includes('UNIQUE')) return res.status(409).json({ error: 'That email is already registered — select it from the list instead.' });
     console.error(e);
@@ -220,6 +268,8 @@ app.post('/api/members', (req, res) => {
 /* ---------- show icon upload (already cropped square in the browser) ---------- */
 const ICON_TYPES = { 'image/png': '.png', 'image/jpeg': '.jpg', 'image/webp': '.webp' };
 app.post('/api/icon', (req, res) => {
+  const free = (() => { try { const st = fs.statfsSync(uploadsDir); return st.bavail * st.bsize; } catch (e) { return Infinity; } })();
+  if (free < 50e6) return res.status(507).json({ error: 'The server is out of space, so images can’t be uploaded right now. Please tell an admin.' });
   const m = /^data:(image\/(?:png|jpeg|webp));base64,([A-Za-z0-9+/=]+)$/.exec(String((req.body && req.body.dataUrl) || ''));
   if (!m) return res.status(400).json({ error: 'Please choose a PNG, JPEG or WebP image.' });
   const buf = Buffer.from(m[2], 'base64');
@@ -286,6 +336,8 @@ app.post('/api/bookings', (req, res) => {
     const rErr = checkRoadshow(b);
     if (rErr) return res.status(400).json({ error: rErr });
     b.pendingApproval = false;
+    db.touchMember(b.email);
+    audit(memberActor(b.name, b.email), 'booking.create', 'Booked ' + bookingLabel(b));
     return res.json(db.upsertBooking(b));
   }
 
@@ -308,6 +360,8 @@ app.post('/api/bookings', (req, res) => {
     }
   }
   b.pendingApproval = pendingApproval;
+  db.touchMember(b.email);
+  audit(memberActor(b.name, b.email), 'booking.create', (pendingApproval ? 'Asked for a DJ-limit override for ' : b.pendingRepeat ? 'Booked (asking for it to repeat weekly) ' : 'Booked ') + bookingLabel(b));
   res.json(db.upsertBooking(b));
 });
 // Anyone on /book can propose a new name, description, image or time for a show.
@@ -337,20 +391,48 @@ app.post('/api/bookings/:id/request-change', (req, res) => {
   if (!changed) return res.status(400).json({ error: 'Nothing has been changed yet.' });
   const note = String(body.note || '').trim().slice(0, 300);
   db.setPendingChange(existing.id, Object.assign(proposed, { note, requestedAt: new Date().toISOString() }));
+  audit('public', 'booking.request-change', 'Change requested for ' + bookingLabel(existing) + (note ? ' — note: ' + note : ''), { proposed });
   res.json(db.getBooking(existing.id));
 });
 app.post('/api/bookings/:id/request-cancel', (req, res) => {
   const existing = db.getBooking(req.params.id);
   if (!existing) return res.status(404).json({ error: 'Not found.' });
   db.setPendingCancel(req.params.id, true);
+  audit('public', 'booking.request-cancel', 'Cancellation requested for ' + bookingLabel(existing));
   res.json(db.getBooking(req.params.id));
 });
 
 /* ---------- admin ---------- */
+// Slow down passphrase guessing: 8 wrong tries from one address locks it out for 15 minutes.
+const loginFails = new Map(); // ip -> { n, first, lockedUntil }
+const LOGIN_MAX_FAILS = 8, LOGIN_WINDOW_MS = 15 * 60 * 1000;
+function loginLocked(ip) {
+  const f = loginFails.get(ip);
+  if (!f) return 0;
+  if (f.lockedUntil && f.lockedUntil > Date.now()) return Math.ceil((f.lockedUntil - Date.now()) / 60000);
+  if (Date.now() - f.first > LOGIN_WINDOW_MS) loginFails.delete(ip);
+  return 0;
+}
+setInterval(() => { const now = Date.now(); loginFails.forEach((f, ip) => { if (now - f.first > LOGIN_WINDOW_MS && !(f.lockedUntil > now)) loginFails.delete(ip); }); }, 10 * 60 * 1000).unref();
 app.post('/api/admin/login', (req, res) => {
+  const ip = req.ip;
+  const wait = loginLocked(ip);
+  if (wait) return res.status(429).json({ error: 'Too many wrong passphrases — try again in ' + wait + ' minute' + (wait > 1 ? 's' : '') + '.' });
   const pass = (req.body && req.body.passphrase) || '';
-  if (!db.checkAdminPassphrase(pass)) return res.status(401).json({ error: 'Incorrect passphrase.' });
+  if (!db.checkAdminPassphrase(pass)) {
+    const f = loginFails.get(ip) || { n: 0, first: Date.now() };
+    f.n++;
+    if (f.n >= LOGIN_MAX_FAILS) {
+      f.lockedUntil = Date.now() + LOGIN_WINDOW_MS;
+      audit('public', 'admin.lockout', 'Admin sign-in locked for 15 minutes after ' + f.n + ' wrong passphrases', { ip });
+    }
+    loginFails.set(ip, f);
+    if (f.n === 3) audit('public', 'admin.login-failed', 'Several wrong admin passphrases entered', { ip });
+    return res.status(401).json({ error: 'Incorrect passphrase.' });
+  }
+  loginFails.delete(ip);
   setSessionCookie(req, res, newSession());
+  audit('admin', 'admin.login', 'Admin signed in' + (req.body && req.body.from === 'system' ? ' (System page)' : ''), { ip });
   res.json({ admin: true });
 });
 app.post('/api/admin/logout', (req, res) => {
@@ -376,21 +458,38 @@ app.post('/api/admin/bookings', requireAdmin, (req, res) => {
     const rErr = checkRoadshow(b);
     if (rErr) return res.status(400).json({ error: rErr });
   }
-  res.json(db.upsertBooking(b));
+  const saved = db.upsertBooking(b);
+  if (!existing) audit('admin', 'booking.create', 'Admin booked ' + bookingLabel(saved) + ' for ' + saved.name, { booking: saved });
+  else {
+    const diff = bookingDiff(existing, saved);
+    const what = existing.pendingRepeat && !saved.pendingRepeat ? (saved.repeat === 'weekly' ? 'Approved weekly repeat for ' : 'Declined weekly repeat for ') : 'Edited ';
+    if (Object.keys(diff).length || what !== 'Edited ') audit('admin', 'booking.edit', what + bookingLabel(existing) + (Object.keys(diff).length ? ' — changed ' + Object.keys(diff).join(', ') : ''), { id: saved.id, changes: diff });
+  }
+  res.json(saved);
 });
-app.delete('/api/admin/bookings/:id', requireAdmin, (req, res) => { db.deleteBooking(req.params.id); res.json({ ok: true }); });
-app.post('/api/admin/bookings/:id/approve-cancel', requireAdmin, (req, res) => { db.deleteBooking(req.params.id); res.json({ ok: true }); });
+// Deleting keeps a full copy of the booking in the log, so it can be put back by hand.
+function deleteWithLog(req, res, action, verb) {
+  const b = db.getBooking(req.params.id);
+  db.deleteBooking(req.params.id);
+  if (b) audit('admin', action, verb + ' ' + bookingLabel(b) + ' by ' + b.name, { booking: b });
+  res.json({ ok: true });
+}
+app.delete('/api/admin/bookings/:id', requireAdmin, (req, res) => deleteWithLog(req, res, 'booking.delete', 'Deleted'));
+app.post('/api/admin/bookings/:id/approve-cancel', requireAdmin, (req, res) => deleteWithLog(req, res, 'booking.cancel-approved', 'Approved cancellation of'));
 app.post('/api/admin/bookings/:id/deny-cancel', requireAdmin, (req, res) => {
   db.setPendingCancel(req.params.id, false);
-  res.json(db.getBooking(req.params.id));
+  const b = db.getBooking(req.params.id);
+  if (b) audit('admin', 'booking.cancel-denied', 'Kept ' + bookingLabel(b) + ' (cancellation request declined)');
+  res.json(b);
 });
 app.post('/api/admin/bookings/:id/approve-override', requireAdmin, (req, res) => {
   const b = db.getBooking(req.params.id);
   if (!b) return res.status(404).json({ error: 'Not found.' });
   b.pendingApproval = false;
+  audit('admin', 'booking.override-approved', 'Approved DJ-limit override for ' + bookingLabel(b) + ' by ' + b.name);
   res.json(db.upsertBooking(b));
 });
-app.post('/api/admin/bookings/:id/deny-override', requireAdmin, (req, res) => { db.deleteBooking(req.params.id); res.json({ ok: true }); });
+app.post('/api/admin/bookings/:id/deny-override', requireAdmin, (req, res) => deleteWithLog(req, res, 'booking.override-denied', 'Denied DJ-limit override for'));
 
 // Apply a member's requested change. Moving a weekly show to a later date splits
 // the series: earlier weeks keep the old details, the new series starts on the
@@ -413,10 +512,13 @@ app.post('/api/admin/bookings/:id/approve-change', requireAdmin, (req, res) => {
     db.upsertBooking(updated);
   }
   db.setPendingChange(b.id, null);
+  audit('admin', 'booking.change-approved', 'Approved change to ' + bookingLabel(b) + (splitSeries ? ' (series split from ' + c.date + ')' : ''), { id: b.id, changes: bookingDiff(b, updated) });
   res.json({ ok: true, split: splitSeries });
 });
 app.post('/api/admin/bookings/:id/deny-change', requireAdmin, (req, res) => {
-  if (!db.getBooking(req.params.id)) return res.status(404).json({ error: 'Not found.' });
+  const b = db.getBooking(req.params.id);
+  if (!b) return res.status(404).json({ error: 'Not found.' });
+  audit('admin', 'booking.change-denied', 'Declined change to ' + bookingLabel(b), { proposed: b.pendingChange });
   db.setPendingChange(req.params.id, null);
   res.json(db.getBooking(req.params.id));
 });
@@ -429,6 +531,7 @@ function csvCell(v) {
   return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
 }
 app.get('/api/admin/members.csv', requireAdmin, (req, res) => {
+  audit('admin', 'member.export', 'Downloaded the member list (CSV)');
   const rows = [['Name', 'Username']].concat(db.listApprovedMembers().map(m => [m.name, m.email.split('@')[0]]));
   const day = new Date().toISOString().slice(0, 10);
   res.set('Content-Type', 'text/csv; charset=utf-8');
@@ -437,18 +540,33 @@ app.get('/api/admin/members.csv', requireAdmin, (req, res) => {
   res.send('﻿' + rows.map(r => r.map(csvCell).join(',')).join('\r\n') + '\r\n');
 });
 app.get('/api/admin/members/pending', requireAdmin, (req, res) => res.json(db.listPendingMembers()));
-app.post('/api/admin/members/:id/approve', requireAdmin, (req, res) => res.json(db.approveMember(+req.params.id)));
+app.post('/api/admin/members/:id/approve', requireAdmin, (req, res) => {
+  const m = db.approveMember(+req.params.id);
+  if (!m) return res.status(404).json({ error: 'Not found.' });
+  audit('admin', 'member.approve', 'Approved member ' + m.name + ' <' + m.email + '>');
+  res.json(m);
+});
 app.put('/api/admin/members/:id/media', requireAdmin, (req, res) => {
   const m = db.setMediaMember(+req.params.id, !!(req.body && req.body.mediaMember));
   if (!m) return res.status(404).json({ error: 'Not found.' });
+  audit('admin', 'member.media', (m.mediaMember ? 'Gave media membership to ' : 'Removed media membership from ') + m.name + ' <' + m.email + '>');
   res.json(m);
 });
-app.delete('/api/admin/members/:id', requireAdmin, (req, res) => { db.deleteMember(+req.params.id); res.json({ ok: true }); });
+app.delete('/api/admin/members/:id', requireAdmin, (req, res) => {
+  const m = db.getMember(+req.params.id);
+  db.deleteMember(+req.params.id);
+  if (m) audit('admin', 'member.delete', (m.approved ? 'Removed member ' : 'Declined registration from ') + m.name + ' <' + m.email + '>');
+  res.json({ ok: true });
+});
 
 app.put('/api/admin/settings', requireAdmin, (req, res) => {
+  const before = db.getSettings();
   const err = db.saveSettings(req.body);
   if (err) return res.status(400).json({ error: err });
-  res.json(db.getSettings());
+  const after = db.getSettings();
+  const changed = Object.keys(after).filter(k => after[k] !== before[k]).map(k => k + ' ' + before[k] + ' → ' + after[k]);
+  if (changed.length) audit('admin', 'settings.update', 'Changed booking limits: ' + changed.join(', '));
+  res.json(after);
 });
 
 /* ---------- show categories ---------- */
@@ -468,13 +586,17 @@ function categoryFields(body, partial) {
 app.post('/api/admin/categories', requireAdmin, (req, res) => {
   const r = categoryFields(req.body || {}, false);
   if (r.error) return res.status(400).json({ error: r.error });
-  res.status(201).json(db.addCategory(r.fields.label, r.fields.color, r.fields.hint));
+  const c = db.addCategory(r.fields.label, r.fields.color, r.fields.hint);
+  audit('admin', 'category.create', 'Added show type "' + c.label + '"');
+  res.status(201).json(c);
 });
 app.put('/api/admin/categories/:key', requireAdmin, (req, res) => {
   const r = categoryFields(req.body || {}, true);
   if (r.error) return res.status(400).json({ error: r.error });
+  const before = db.listCategories().find(x => x.key === req.params.key);
   const c = db.updateCategory(req.params.key, r.fields);
   if (!c) return res.status(404).json({ error: 'Not found.' });
+  audit('admin', 'category.edit', 'Edited show type "' + before.label + '"' + (before.label !== c.label ? ' → "' + c.label + '"' : ''), { before, after: c });
   res.json(c);
 });
 app.post('/api/admin/categories/:key/move', requireAdmin, (req, res) => {
@@ -483,7 +605,9 @@ app.post('/api/admin/categories/:key/move', requireAdmin, (req, res) => {
 });
 app.delete('/api/admin/categories/:key', requireAdmin, (req, res) => {
   if (req.params.key === 'other') return res.status(400).json({ error: '“Other” can’t be removed — it’s where bookings go when their show type is deleted.' });
+  const c = db.listCategories().find(x => x.key === req.params.key);
   db.deleteCategory(req.params.key);
+  if (c) audit('admin', 'category.delete', 'Removed show type "' + c.label + '" (its bookings moved to Other)', { category: c });
   res.json({ ok: true });
 });
 
@@ -491,7 +615,9 @@ app.post('/api/admin/equipment', requireAdmin, (req, res) => {
   const name = String((req.body && req.body.name) || '').trim();
   const notes = String((req.body && req.body.notes) || '').trim();
   if (!name) return res.status(400).json({ error: 'Please enter an item name.' });
-  res.status(201).json(db.addEquipment(name, notes));
+  const item = db.addEquipment(name, notes);
+  audit('admin', 'equipment.create', 'Added Roadshow item "' + name + '"');
+  res.status(201).json(item);
 });
 app.put('/api/admin/equipment/:id', requireAdmin, (req, res) => {
   const body = req.body || {};
@@ -499,10 +625,189 @@ app.put('/api/admin/equipment/:id', requireAdmin, (req, res) => {
   if (body.name != null) { fields.name = String(body.name).trim(); if (!fields.name) return res.status(400).json({ error: 'Please enter an item name.' }); }
   if (body.notes != null) fields.notes = String(body.notes).trim();
   if (body.active != null) fields.active = !!body.active;
+  const before = db.getEquipment(+req.params.id);
   const item = db.updateEquipment(+req.params.id, fields);
   if (!item) return res.status(404).json({ error: 'Not found.' });
+  audit('admin', 'equipment.edit', (fields.active != null && fields.active !== before.active ? (item.active ? 'Brought back' : 'Retired') : 'Edited') + ' Roadshow item "' + before.name + '"', { before, after: item });
   res.json(item);
 });
-app.delete('/api/admin/equipment/:id', requireAdmin, (req, res) => { db.deleteEquipment(+req.params.id); res.json({ ok: true }); });
+app.delete('/api/admin/equipment/:id', requireAdmin, (req, res) => {
+  const item = db.getEquipment(+req.params.id);
+  db.deleteEquipment(+req.params.id);
+  if (item) audit('admin', 'equipment.delete', 'Deleted Roadshow item "' + item.name + '"', { item });
+  res.json({ ok: true });
+});
 
+/* ---------- System page (/system) ----------
+   Backups, restore, data retention, the yearly reset, archives, the activity log
+   and health checks. Anything that can't be undone asks for the passphrase again. */
+function confirmed(req, res) {
+  const pass = (req.body && req.body.passphrase) || req.get('X-Confirm-Passphrase') || '';
+  if (db.checkAdminPassphrase(pass)) return true;
+  res.status(403).json({ error: 'Type the admin passphrase to confirm.', needPassphrase: true });
+  return false;
+}
+// Wraps async handlers so a failure becomes a readable error (and is logged) instead of a hung request.
+function job(fn) {
+  return (req, res) => Promise.resolve(fn(req, res)).catch(e => {
+    if (e.expected) return res.status(400).json({ error: e.message });
+    console.error(e);
+    audit('admin', 'error.system', 'System page action failed (' + req.method + ' ' + req.path + '): ' + e.message);
+    if (!res.headersSent) res.status(500).json({ error: e.message || 'Something went wrong.' });
+  });
+}
+function sendDownload(res, name, type, body) {
+  res.set('Content-Type', type);
+  res.set('Content-Disposition', 'attachment; filename="' + name + '"');
+  res.set('Cache-Control', 'no-store');
+  res.send(body);
+}
+const sys = express.Router();
+sys.use(requireAdmin);
+sys.get('/overview', (req, res) => {
+  const counts = {
+    bookings: db.raw.prepare('SELECT COUNT(*) AS n FROM bookings').get().n,
+    members: db.raw.prepare('SELECT COUNT(*) AS n FROM members WHERE approved = 1').get().n,
+    pendingMembers: db.raw.prepare('SELECT COUNT(*) AS n FROM members WHERE approved = 0').get().n,
+    archives: db.listArchives().length,
+    logEntries: db.raw.prepare('SELECT COUNT(*) AS n FROM audit_log').get().n
+  };
+  res.json({
+    health: ops.getHealth(), reset: ops.resetStatus(), config: ops.config(), counts,
+    lastBackup: db.getStateJson('lastBackup'), lastIntegrity: db.getStateJson('lastIntegrity'), lastRetention: db.getStateJson('lastRetention'),
+    lastOffsiteDownload: db.getState('lastOffsiteDownload'), recovery: db.recovery,
+    server: { startedAt: ops.STARTED_AT.toISOString(), node: process.versions.node, platform: process.platform + ' ' + require('os').release(), hostname: require('os').hostname(),
+      dataDir: db.dataDir, backupDir: ops.BACKUP_DIR, mirrorDir: ops.MIRROR_DIR, appDir: __dirname }
+  });
+});
+sys.post('/health/run', job(async (req, res) => res.json(await ops.runHealthChecks('admin'))));
+sys.post('/integrity', (req, res) => res.json(ops.integrityCheck('admin')));
+
+sys.get('/backups', (req, res) => res.json(ops.listBackups()));
+sys.post('/backups', job(async (req, res) => res.json(await ops.makeBackup('manual', 'admin'))));
+sys.get('/backups/:name/download', (req, res) => {
+  const p = ops.backupPath(req.params.name);
+  if (!p) return res.status(404).json({ error: 'Not found.' });
+  audit('admin', 'backup.download', 'Downloaded backup ' + req.params.name);
+  res.download(p, req.params.name);
+});
+sys.get('/bundle', job(async (req, res) => {
+  const buf = await ops.buildBundle();
+  const name = 'urb-backup-' + new Date().toISOString().slice(0, 10) + '.urbbackup';
+  db.setState('lastOffsiteDownload', new Date().toISOString());
+  audit('admin', 'backup.download', 'Downloaded a portable backup (' + Math.round(buf.length / 1024) + ' KB)');
+  sendDownload(res, name, 'application/octet-stream', buf);
+}));
+sys.get('/export.json', (req, res) => {
+  audit('admin', 'backup.export', 'Downloaded a readable export of all data (JSON)');
+  sendDownload(res, 'urb-export-' + new Date().toISOString().slice(0, 10) + '.json', 'application/json; charset=utf-8', JSON.stringify(ops.readableExport(), null, 2));
+});
+sys.post('/backups/:name/restore', job(async (req, res) => {
+  if (!confirmed(req, res)) return;
+  const p = ops.backupPath(req.params.name);
+  if (!p) return res.status(404).json({ error: 'Not found.' });
+  res.json(await ops.restoreFromFile(p, 'admin', 'backup ' + req.params.name));
+}));
+sys.post('/restore-upload', express.raw({ type: '*/*', limit: '500mb' }), job(async (req, res) => {
+  if (!confirmed(req, res)) return;
+  if (!req.body || !req.body.length) return res.status(400).json({ error: 'No file received.' });
+  res.json(await ops.restoreFromUpload(req.body, 'admin', req.get('X-Filename')));
+}));
+
+sys.get('/retention/preview', (req, res) => res.json(ops.retention(false)));
+sys.post('/retention/run', job(async (req, res) => {
+  if (!confirmed(req, res)) return;
+  await ops.makeBackup('manual', 'admin');
+  res.json(ops.retention(true, 'admin'));
+}));
+sys.post('/person/find', (req, res) => {
+  const p = ops.findPerson(req.body && req.body.email);
+  if (!p) return res.status(400).json({ error: 'Enter an email address.' });
+  audit('admin', 'privacy.lookup', 'Looked up the data held about one person');
+  res.json(p);
+});
+sys.post('/person/erase', job(async (req, res) => {
+  if (!confirmed(req, res)) return;
+  res.json(await ops.erasePerson(req.body && req.body.email, 'admin'));
+}));
+
+sys.get('/reset', (req, res) => res.json(ops.resetStatus()));
+sys.post('/reset', job(async (req, res) => {
+  if (!confirmed(req, res)) return;
+  const today = new Date();
+  const ds = today.getFullYear() + '-' + String(today.getMonth() + 1).padStart(2, '0') + '-' + String(today.getDate()).padStart(2, '0');
+  res.json(await ops.clearSchedule({ cutoff: ds, label: 'Cleared by hand on ' + ds, reason: 'cleared by hand', clearMedia: !!(req.body && req.body.clearMedia) }, 'admin'));
+}));
+sys.get('/archives', (req, res) => res.json(db.listArchives()));
+sys.get('/archives/:id', (req, res) => {
+  const a = db.getArchive(+req.params.id);
+  if (!a) return res.status(404).json({ error: 'Not found.' });
+  res.json(a);
+});
+sys.get('/archives/:id/csv', (req, res) => {
+  const a = db.getArchive(+req.params.id);
+  if (!a) return res.status(404).json({ error: 'Not found.' });
+  const cats = {}; ((a.data && a.data.categories) || []).forEach(c => { cats[c.key] = c.label; });
+  const hhmm = m => String(Math.floor((m % 1440) / 60)).padStart(2, '0') + ':' + String(m % 60).padStart(2, '0');
+  const rows = [['Studio', 'Show', 'Presenter', 'Show type', 'First date', 'Day', 'Start', 'End', 'Repeats', 'Until', 'Description']].concat(
+    ((a.data && a.data.bookings) || []).map(b => [{ 1: 'Studio One', 2: 'Studio Two', 3: 'Roadshow' }[b.studio], b.title, b.name, cats[b.category] || '', b.date,
+      ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][new Date(b.date + 'T12:00').getDay()], hhmm(b.startMin), hhmm(b.endMin), b.repeat === 'weekly' ? 'Weekly' : 'No', b.repeat === 'weekly' ? (b.repeatUntil || a.data.cutoff) : '', b.description || '']));
+  audit('admin', 'archive.export', 'Downloaded the "' + a.label + '" archive (CSV)');
+  sendDownload(res, 'urb-schedule-' + a.label.replace(/[^a-z0-9]+/gi, '-') + '.csv', 'text/csv; charset=utf-8', '\ufeff' + rows.map(r => r.map(csvCell).join(',')).join('\r\n') + '\r\n');
+});
+sys.post('/archives/:id/undo', (req, res) => {
+  if (!confirmed(req, res)) return;
+  try { res.json(ops.undoArchive(+req.params.id, 'admin')); } catch (e) { if (!e.expected) throw e; res.status(400).json({ error: e.message }); }
+});
+
+sys.get('/log', (req, res) => res.json(db.listAudit(req.query)));
+sys.get('/log.csv', (req, res) => {
+  const rows = [['When (UTC)', 'Who', 'Action', 'What happened', 'Details']].concat(
+    db.listAudit(Object.assign({}, req.query, { limit: 5000 })).map(r => [r.at, r.actor, r.action, r.summary, r.details ? JSON.stringify(r.details) : '']));
+  sendDownload(res, 'urb-activity-log-' + new Date().toISOString().slice(0, 10) + '.csv', 'text/csv; charset=utf-8', '\ufeff' + rows.map(r => r.map(csvCell).join(',')).join('\r\n') + '\r\n');
+});
+
+sys.put('/config', (req, res) => {
+  const err = ops.saveConfig(req.body || {}, 'admin');
+  if (err) return res.status(400).json({ error: err });
+  res.json(ops.config());
+});
+sys.post('/passphrase', (req, res) => {
+  const body = req.body || {};
+  if (!db.checkAdminPassphrase(body.current || '')) return res.status(403).json({ error: 'The current passphrase is wrong.' });
+  const next = String(body.next || '');
+  if (next.length < 10) return res.status(400).json({ error: 'Use at least 10 characters — a few random words works well.' });
+  if (next === 'change-this-passphrase') return res.status(400).json({ error: 'Pick something other than the example passphrase.' });
+  db.setAdminPassphrase(next);
+  db.setState('passphraseChangedAt', new Date().toISOString());
+  audit('admin', 'admin.passphrase', 'Admin passphrase changed on the System page — all admins were signed out');
+  const token = newSession();
+  setSessionCookie(req, res, token);
+  res.json({ ok: true });
+});
+app.use('/api/system', sys);
+
+/* ---------- errors ---------- */
+app.use('/api', (req, res) => res.status(404).json({ error: 'Not found.' }));
+app.use((err, req, res, next) => {
+  if (err && (err.type === 'entity.parse.failed' || err.type === 'entity.too.large')) {
+    return res.status(err.status || 400).json({ error: err.type === 'entity.too.large' ? 'That upload is too large.' : 'The request couldn’t be read.' });
+  }
+  console.error(err);
+  audit('system', 'error.request', 'Unexpected error on ' + req.method + ' ' + req.path + ': ' + (err && err.message));
+  if (!res.headersSent) res.status(500).json({ error: 'Something went wrong on the server. It has been logged.' });
+});
+process.on('unhandledRejection', e => { console.error(e); audit('system', 'error.unhandled', 'Unhandled error: ' + (e && e.message || e)); });
+process.on('uncaughtException', e => {
+  console.error(e);
+  audit('system', 'error.crash', 'The server crashed and is restarting: ' + (e && e.stack || e).toString().slice(0, 400));
+  process.exit(1); // the service manager (systemd/pm2) starts it again
+});
+// Close the database cleanly on shutdown/restart so nothing half-written is left behind.
+['SIGTERM', 'SIGINT'].forEach(sig => process.on(sig, () => {
+  try { audit('system', 'server.stop', 'Server stopping (' + sig + ')'); db.raw.close(); } catch (e) {}
+  process.exit(0);
+}));
+
+ops.start();
 app.listen(PORT, () => console.log('URB Studio Booking listening on port ' + PORT));

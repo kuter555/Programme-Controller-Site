@@ -6,8 +6,59 @@ const Database = require('better-sqlite3');
 
 const dataDir = path.join(__dirname, 'data');
 if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
+const dbPath = path.join(dataDir, 'urb.db');
+// Backups live in data/backups unless BACKUP_DIR points somewhere else (ideally another disk).
+const backupDir = path.resolve(process.env.BACKUP_DIR || path.join(dataDir, 'backups'));
 
-const db = new Database(path.join(dataDir, 'urb.db'));
+/* ---------- self-recovery on startup ----------
+   If the database file is missing or damaged but backups exist, put the newest
+   good backup in its place before opening it, so the site comes back on its own.
+   What happened is kept in `recovery` and written to the activity log below. */
+function quickCheck(file) {
+  let probe;
+  try {
+    probe = new Database(file, { readonly: true, fileMustExist: true });
+    const res = probe.pragma('quick_check', { simple: true });
+    const hasTables = !!probe.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'bookings'").get();
+    return res === 'ok' && hasTables;
+  } catch (e) {
+    return false;
+  } finally {
+    if (probe) try { probe.close(); } catch (e) {}
+  }
+}
+function newestGoodBackup() {
+  if (!fs.existsSync(backupDir)) return null;
+  // Names start urb-YYYY-MM-DD_HHMMSS: newest first, with file times breaking same-second ties.
+  const files = fs.readdirSync(backupDir).filter(f => /^urb-.*\.db$/.test(f))
+    .map(f => ({ f, t: f.slice(0, 21), m: fs.statSync(path.join(backupDir, f)).mtimeMs }))
+    .sort((a, b) => (a.t < b.t ? 1 : a.t > b.t ? -1 : b.m - a.m)).map(x => x.f);
+  for (const f of files) if (quickCheck(path.join(backupDir, f))) return f;
+  return null;
+}
+let recovery = null;
+(function recoverIfNeeded() {
+  const exists = fs.existsSync(dbPath);
+  if (exists && quickCheck(dbPath)) return;
+  const pick = newestGoodBackup();
+  if (!pick) {
+    if (exists) recovery = { ok: false, reason: 'damaged', message: 'The database failed its health check on startup and no good backup was found, so it was left as it is.' };
+    return;
+  }
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  if (exists) {
+    ['', '-wal', '-shm'].forEach(ext => { if (fs.existsSync(dbPath + ext)) fs.renameSync(dbPath + ext, dbPath + '.damaged-' + stamp + ext); });
+  } else {
+    ['-wal', '-shm'].forEach(ext => { if (fs.existsSync(dbPath + ext)) fs.rmSync(dbPath + ext); });
+  }
+  fs.copyFileSync(path.join(backupDir, pick), dbPath);
+  recovery = { ok: true, reason: exists ? 'damaged' : 'missing', backup: pick,
+    message: (exists ? 'The database was damaged (the bad copy was kept as data/urb.db.damaged-' + stamp + ')' : 'The database file was missing') +
+      ', so it was restored automatically from backup ' + pick + '. Anything changed after that backup was taken is lost.' };
+  console.error('[recovery] ' + recovery.message);
+})();
+
+const db = new Database(dbPath);
 db.pragma('journal_mode = WAL');
 
 db.exec(`
@@ -63,6 +114,26 @@ db.exec(`
     hint TEXT NOT NULL DEFAULT '',
     sort INTEGER NOT NULL DEFAULT 0
   );
+  -- Everything anyone does on the site, plus what the server does by itself.
+  CREATE TABLE IF NOT EXISTS audit_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    at TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    action TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    details TEXT
+  );
+  CREATE INDEX IF NOT EXISTS audit_log_at ON audit_log (at);
+  -- A snapshot of each academic year's schedule, taken when it's cleared on 1 September.
+  CREATE TABLE IF NOT EXISTS archives (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    label TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    booking_count INTEGER NOT NULL,
+    data TEXT NOT NULL,
+    undone_at TEXT
+  );
 `);
 
 // Migrate older databases created before these columns existed.
@@ -91,6 +162,8 @@ if (existingMemberCols.includes('pw_hash')) db.exec("UPDATE members SET pw_salt 
 db.exec("DROP TABLE IF EXISTS member_sessions; DROP TABLE IF EXISTS member_tokens;");
 // Only members with media membership (switched on by an admin) can book.
 if (!existingMemberCols.includes('media_member')) db.exec("ALTER TABLE members ADD COLUMN media_member INTEGER NOT NULL DEFAULT 0");
+// When the member last booked or asked for something — drives the inactive-member clean-up.
+if (!existingMemberCols.includes('last_active_at')) db.exec("ALTER TABLE members ADD COLUMN last_active_at TEXT");
 
 // Show types are admin-editable; seed the starting set the first time.
 // 'other' is permanent: removed categories fall back to it.
@@ -124,18 +197,28 @@ function verifyPassphrase(passphrase, salt, hash) {
   return crypto.timingSafeEqual(check, stored);
 }
 
-// Re-hash and store the passphrase from .env every time the server starts,
-// so changing ADMIN_PASSPHRASE and restarting is all it takes to rotate it.
-function ensureAdminPassphrase(passphraseFromEnv) {
-  if (!passphraseFromEnv) throw new Error('ADMIN_PASSPHRASE is not set in .env');
-  const row = db.prepare('SELECT salt, hash FROM admin_secret WHERE id = 1').get();
-  // Unchanged passphrase: keep the stored hash and existing sessions.
-  if (row && verifyPassphrase(passphraseFromEnv, row.salt, row.hash)) return;
-  const { salt, hash } = hashPassphrase(passphraseFromEnv);
+// The passphrase can be changed from the System page, or by editing ADMIN_PASSPHRASE
+// in .env and restarting (the break-glass route if nobody remembers it). The .env
+// value only takes over when it differs from the last .env value applied, so a
+// passphrase changed on the System page survives restarts.
+function setAdminPassphrase(passphrase) {
+  const { salt, hash } = hashPassphrase(passphrase);
   db.prepare(`INSERT INTO admin_secret (id, salt, hash) VALUES (1, ?, ?)
               ON CONFLICT(id) DO UPDATE SET salt=excluded.salt, hash=excluded.hash`).run(salt, hash);
   // Rotating the passphrase signs everyone out.
   db.prepare('DELETE FROM admin_sessions').run();
+}
+// Returns true when the .env passphrase was (re)applied.
+function ensureAdminPassphrase(passphraseFromEnv) {
+  if (!passphraseFromEnv) throw new Error('ADMIN_PASSPHRASE is not set in .env');
+  const row = db.prepare('SELECT salt, hash FROM admin_secret WHERE id = 1').get();
+  const envSeen = parseJson(getState('envPassphrase'));
+  if (row && envSeen && verifyPassphrase(passphraseFromEnv, envSeen.salt, envSeen.hash)) return false;
+  setState('envPassphrase', JSON.stringify(hashPassphrase(passphraseFromEnv)));
+  // Unchanged passphrase: keep the stored hash and existing sessions.
+  if (row && verifyPassphrase(passphraseFromEnv, row.salt, row.hash)) return false;
+  setAdminPassphrase(passphraseFromEnv);
+  return true;
 }
 function checkAdminPassphrase(passphrase) {
   const row = db.prepare('SELECT salt, hash FROM admin_secret WHERE id = 1').get();
@@ -235,7 +318,7 @@ function rowToBooking(r) {
   };
 }
 function rowToMember(r) {
-  return { id: r.id, name: r.name, email: r.email, approved: !!r.approved, createdAt: r.created_at, mediaMember: !!r.media_member };
+  return { id: r.id, name: r.name, email: r.email, approved: !!r.approved, createdAt: r.created_at, mediaMember: !!r.media_member, lastActiveAt: r.last_active_at || null };
 }
 
 /* ---------- bookings ---------- */
@@ -365,8 +448,77 @@ function moveCategory(key, dir) {
   db.transaction(() => list.forEach((k, idx) => upd.run(idx, k)))();
 }
 
+/* ---------- system config + server state (System page) ----------
+   Stored in the settings table as JSON under 'sys.*' (things admins set) and
+   'state.*' (things the server keeps track of, e.g. when the last backup ran). */
+function getKey(key) {
+  const r = db.prepare('SELECT value FROM settings WHERE key = ?').get(key);
+  return r ? r.value : null;
+}
+function setKey(key, value) {
+  if (value == null) db.prepare('DELETE FROM settings WHERE key = ?').run(key);
+  else db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(key, value);
+}
+function getState(name) { return getKey('state.' + name); }
+function setState(name, value) { setKey('state.' + name, value); }
+function getStateJson(name) { return parseJson(getState(name)); }
+function setStateJson(name, value) { setState(name, value == null ? null : JSON.stringify(value)); }
+function getSys(name, fallback) {
+  const raw = getKey('sys.' + name);
+  if (raw == null) return fallback;
+  try { return JSON.parse(raw); } catch (e) { return fallback; }
+}
+function setSys(name, value) { setKey('sys.' + name, JSON.stringify(value)); }
+
+/* ---------- activity log ---------- */
+function addAudit(actor, action, summary, details) {
+  db.prepare('INSERT INTO audit_log (at, actor, action, summary, details) VALUES (?, ?, ?, ?, ?)').run(
+    new Date().toISOString(), String(actor || 'system').slice(0, 200), action, String(summary).slice(0, 500),
+    details == null ? null : JSON.stringify(details));
+}
+// Newest first. filter: { q, type (action prefix), from, to (YYYY-MM-DD), before (id), limit }
+function listAudit(filter) {
+  const f = filter || {};
+  const where = [], args = [];
+  if (f.q) { where.push('(summary LIKE ? OR actor LIKE ? OR details LIKE ?)'); const q = '%' + f.q + '%'; args.push(q, q, q); }
+  if (f.type) { where.push('action LIKE ?'); args.push(f.type + '%'); }
+  if (f.from) { where.push('at >= ?'); args.push(f.from); }
+  if (f.to) { where.push('at < ?'); args.push(f.to + 'T99'); }
+  if (f.before) { where.push('id < ?'); args.push(Number(f.before)); }
+  const sql = 'SELECT * FROM audit_log' + (where.length ? ' WHERE ' + where.join(' AND ') : '') + ' ORDER BY id DESC LIMIT ?';
+  args.push(Math.min(Number(f.limit) || 100, 5000));
+  return db.prepare(sql).all(...args).map(r => ({ id: r.id, at: r.at, actor: r.actor, action: r.action, summary: r.summary, details: parseJson(r.details) }));
+}
+
+/* ---------- schedule archives ---------- */
+function rowToArchive(r, withData) {
+  const out = { id: r.id, label: r.label, createdAt: r.created_at, reason: r.reason, bookingCount: r.booking_count, undoneAt: r.undone_at || null };
+  if (withData) out.data = parseJson(r.data);
+  return out;
+}
+function listArchives() { return db.prepare('SELECT id, label, created_at, reason, booking_count, undone_at FROM archives ORDER BY created_at DESC').all().map(r => rowToArchive(r, false)); }
+function getArchive(id) {
+  const r = db.prepare('SELECT * FROM archives WHERE id = ?').get(id);
+  return r ? rowToArchive(r, true) : null;
+}
+function addArchive(label, reason, data) {
+  const info = db.prepare('INSERT INTO archives (label, created_at, reason, booking_count, data) VALUES (?, ?, ?, ?, ?)').run(
+    label, new Date().toISOString(), reason, data.bookings.length, JSON.stringify(data));
+  return info.lastInsertRowid;
+}
+function saveArchiveData(id, data) { db.prepare('UPDATE archives SET data = ? WHERE id = ?').run(JSON.stringify(data), id); }
+function markArchiveUndone(id) { db.prepare('UPDATE archives SET undone_at = ? WHERE id = ?').run(new Date().toISOString(), id); }
+
+function touchMember(email) {
+  db.prepare("UPDATE members SET last_active_at = datetime('now') WHERE email = ? COLLATE NOCASE").run(email);
+}
+
 module.exports = {
-  ensureAdminPassphrase, checkAdminPassphrase,
+  raw: db, dbPath, dataDir, backupDir, quickCheck, recovery,
+  getState, setState, getStateJson, setStateJson, getSys, setSys,
+  addAudit, listAudit,
+  listArchives, getArchive, addArchive, saveArchiveData, markArchiveUndone, touchMember,
+  ensureAdminPassphrase, setAdminPassphrase, checkAdminPassphrase,
   createSession, getSessionExpiry, extendSession, deleteSession, purgeExpiredSessions,
   getSettings, saveSettings,
   listEquipment, getEquipment, addEquipment, updateEquipment, deleteEquipment,

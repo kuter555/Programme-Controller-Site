@@ -382,9 +382,12 @@
       var weekStart = this.stripTime(this.addDays(this.parse(dateStr), -wd));
       var weekEnd = this.addDays(weekStart, 6);
       var used = 0;
+      // Public booking lists leave out emails, so match on the member's ownerKey when we have it.
+      var me = this.state.members.find(function (m) { return m.email.toLowerCase() === email.toLowerCase(); });
+      var key = me && me.ownerKey;
       this.state.bookings.forEach(function (b) {
         if (b.studio !== 2 || b.repeat === 'weekly' || b.pendingApproval || b.id === excludeId) return;
-        if (b.email.toLowerCase() !== email.toLowerCase()) return;
+        if (key && b.ownerKey ? b.ownerKey !== key : b.email.toLowerCase() !== email.toLowerCase()) return;
         var d = this.parse(b.date);
         if (d < weekStart || d > weekEnd) return;
         used += (b.endMin - b.startMin);
@@ -1958,7 +1961,9 @@
           this.state.admin ? h('div', { className: 'urb-admin-nav' },
             [['schedule', 'Schedule'], ['members', 'Members'], ['categories', 'Show types'], ['settings', 'Settings'], ['equipment', 'Equipment']].map(function (p) {
               return h('button', { key: p[0], className: 'btn btn-sm' + (page === p[0] ? ' btn-primary' : ''), onClick: function () { this.openPage(p[0]); }.bind(this) }, p[1]);
-            }, this)
+            }, this),
+            // Backups, logs, data retention and the yearly reset live on their own page.
+            h('a', { className: 'btn btn-sm urb-download', href: '/system', title: 'Backups, activity log, data retention, yearly reset and health checks' }, 'System ↗')
           ) : null,
 
           page === 'members' ? this.renderMembersPage() : null,

@@ -1,0 +1,22 @@
+# systemd service: keeps the booking site running, and restarts it after a crash or reboot.
+# Install:  sudo cp deploy/urb-booking.service /etc/systemd/system/
+#           sudo systemctl daemon-reload && sudo systemctl enable --now urb-booking
+[Unit]
+Description=URB Studio Booking
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Change these to the user and folder the site actually runs as/from.
+User=urb
+WorkingDirectory=/opt/urb-booking
+ExecStart=/usr/bin/node server.js
+Restart=always
+RestartSec=5
+Environment=NODE_ENV=production
+# Give the database time to close cleanly on restart.
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target
