@@ -17,9 +17,11 @@
   window.__urbListenLiveLoaded = true;
 
   // Built-in fallback; the booking site's System page can change these, and /api/now sends the current list.
+  // Best quality first; later entries are lighter fallbacks the player steps down to.
   var STREAMS = [
     'https://urb-ice.bath.ac.uk/urb/320.mp3',
-    'https://urb-ice.bath.ac.uk/urb/128.mp3' // fallback if the 320 mount fails
+    'https://urb-ice.bath.ac.uk/urb/128.mp3',
+    'https://urb-ice.bath.ac.uk/urb/64.mp3'
   ];
   var REFRESH_MS = 60000;
 
@@ -209,14 +211,79 @@
       x.send();
     }
 
+    /*
+     * Keeping a live stream smooth
+     * ----------------------------
+     * On connect, Icecast sends a few seconds of audio up front (a "burst"); after
+     * that audio only arrives in real time. So once a network blip drains the
+     * player's reserve it can never catch up, and plays choppily (stall, play a
+     * moment, stall...) until the page is reloaded. Reloading helps only because a
+     * new connection gets a fresh burst.
+     *
+     * So: when playback stalls for more than a moment, or keeps hiccuping, quietly
+     * reconnect (a fresh burst, same as a reload). If that keeps happening, step
+     * down to the next, lighter stream in the list, which needs less bandwidth and
+     * gets more seconds of audio in its burst.
+     */
+    var STALL_RECONNECT_MS = 2500;   // a single stall longer than this -> reconnect
+    var HICCUPS_BEFORE_RECONNECT = 3; // or this many short stalls...
+    var HICCUP_WINDOW_MS = 30000;     // ...within this long
+    var RECONNECTS_BEFORE_STEP_DOWN = 2; // reconnects within STEP_WINDOW_MS before trying a lighter stream
+    var STEP_WINDOW_MS = 120000;
+    var MAX_RECONNECTS = 8;           // in STEP_WINDOW_MS, before giving up with an error
+
+    var stallTimer = null, hiccups = [], reconnects = [], struggles = [], lastTime = 0, lastProgressAt = 0, watchdog = null;
+
+    // Slow mobile data or data-saver: start on the second (lighter) stream.
+    function startIndex() {
+      var c = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+      var slow = c && (c.saveData || /(^|-)2g$|^3g$/.test(c.effectiveType || ''));
+      return slow && STREAMS.length > 1 ? 1 : 0;
+    }
+    function recent(list, windowMs) {
+      var cutoff = Date.now() - windowMs;
+      while (list.length && list[0] < cutoff) list.shift();
+      return list.length;
+    }
+    function clearStall() { clearTimeout(stallTimer); stallTimer = null; }
+
+    function connect() {
+      clearStall();
+      // Fresh URL each time so we join the live stream now (with a new burst), not an old buffer.
+      audio.src = STREAMS[streamIdx] + (STREAMS[streamIdx].indexOf('?') < 0 ? '?' : '&') + 't=' + Date.now();
+      lastTime = 0; lastProgressAt = Date.now();
+      var p = audio.play();
+      if (p && p.catch) p.catch(function (e) {
+        // Autoplay refusals etc. — go back to idle rather than spinning forever.
+        if (e && e.name === 'NotAllowedError' && state !== 'idle') { stop(); }
+      });
+    }
+    // `struggling` is true for stalls (too little bandwidth); a dropped connection or
+    // coming back online just reconnects without stepping down the quality.
+    function reconnect(reason, struggling) {
+      if (state === 'idle' || state === 'error') return;
+      reconnects.push(Date.now());
+      var n = recent(reconnects, STEP_WINDOW_MS);
+      if (n > MAX_RECONNECTS) { stop(); state = 'error'; render(); return; }
+      if (struggling) struggles.push(Date.now());
+      if (struggling && recent(struggles, STEP_WINDOW_MS) >= RECONNECTS_BEFORE_STEP_DOWN && streamIdx < STREAMS.length - 1) {
+        streamIdx++;            // keeps struggling: try a lighter stream
+        struggles = [];
+      }
+      if (window.console && console.info) console.info('[URB Listen Live] reconnecting (' + reason + ') on ' + STREAMS[streamIdx]);
+      hiccups = [];
+      state = 'loading'; render();
+      connect();
+    }
     function play() {
       state = 'loading'; render();
-      // Fresh URL each time so we join the live stream now, not replay an old buffer.
-      audio.src = STREAMS[streamIdx] + '?t=' + Date.now();
-      var p = audio.play();
-      if (p && p.catch) p.catch(function () { if (state === 'loading') { state = 'idle'; render(); } });
+      hiccups = []; reconnects = []; struggles = [];
+      connect();
+      startWatchdog();
     }
     function stop() {
+      clearStall();
+      stopWatchdog();
       audio.pause();
       audio.removeAttribute('src'); // stop downloading the stream
       audio.load();
@@ -224,16 +291,45 @@
     }
     function toggle() {
       if (state === 'playing' || state === 'loading') stop();
-      else { streamIdx = 0; play(); }
+      else { streamIdx = startIndex(); play(); }
     }
 
-    audio.addEventListener('playing', function () { state = 'playing'; render(); });
-    audio.addEventListener('waiting', function () { if (state === 'playing') { state = 'loading'; render(); } });
+    // Some browsers stop firing 'waiting' once they're limping along, so also check
+    // that the playback position is actually moving.
+    function startWatchdog() {
+      stopWatchdog();
+      watchdog = setInterval(function () {
+        if (state !== 'playing' || audio.paused) return;
+        if (audio.currentTime !== lastTime) { lastTime = audio.currentTime; lastProgressAt = Date.now(); return; }
+        if (Date.now() - lastProgressAt > STALL_RECONNECT_MS + 1500) reconnect('no progress', true);
+      }, 1000);
+    }
+    function stopWatchdog() { clearInterval(watchdog); watchdog = null; }
+
+    audio.addEventListener('playing', function () {
+      clearStall();
+      lastProgressAt = Date.now();
+      state = 'playing'; render();
+    });
+    audio.addEventListener('waiting', function () {
+      if (state !== 'playing' && state !== 'loading') return;
+      if (state === 'playing') {
+        hiccups.push(Date.now());
+        if (recent(hiccups, HICCUP_WINDOW_MS) >= HICCUPS_BEFORE_RECONNECT) { reconnect('repeated stalls', true); return; }
+        state = 'loading'; render();
+      }
+      clearStall();
+      stallTimer = setTimeout(function () { reconnect('stalled', true); }, STALL_RECONNECT_MS);
+    });
+    // The server or network closed the connection: a live stream should never "end".
+    audio.addEventListener('ended', function () { reconnect('ended', false); });
     audio.addEventListener('error', function () {
       if (state === 'idle') return; // error from clearing src in stop()
-      if (streamIdx < STREAMS.length - 1) { streamIdx++; play(); return; }
+      if (streamIdx < STREAMS.length - 1) { streamIdx++; state = 'loading'; render(); connect(); return; }
       state = 'error'; render();
     });
+    // Back online after a drop (e.g. phone switching networks): reconnect straight away.
+    window.addEventListener('online', function () { if (state === 'playing' || state === 'loading') reconnect('back online', false); });
 
     card.addEventListener('click', toggle);
     card.addEventListener('keydown', function (e) {

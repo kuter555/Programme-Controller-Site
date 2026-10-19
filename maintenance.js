@@ -38,7 +38,8 @@ const STARTED_AT = new Date();
 
 const DEFAULTS = {
   publicUrl: process.env.PUBLIC_URL || 'https://urb-booking.co.uk',
-  streams: ['https://urb-ice.bath.ac.uk/urb/320.mp3', 'https://urb-ice.bath.ac.uk/urb/128.mp3'],
+  // Best quality first; the Listen Live player steps down this list if a connection struggles.
+  streams: ['https://urb-ice.bath.ac.uk/urb/320.mp3', 'https://urb-ice.bath.ac.uk/urb/128.mp3', 'https://urb-ice.bath.ac.uk/urb/64.mp3'],
   // 0 switches a rule off.
   retention: { emailMonths: 12, nameMonths: 60, inactiveMemberMonths: 18, pendingMemberDays: 60, orphanImageDays: 7 },
   reset: { enabled: true, clearMedia: false },
