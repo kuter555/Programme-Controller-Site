@@ -476,3 +476,27 @@ input[type="date"].urb-input::-webkit-date-and-time-value{text-align:left;margin
 .btn-danger-solid{background:var(--danger);border-color:transparent;color:#fff;}
 .urb-error-inline{color:var(--danger);font-weight:700;font-size:12px;}
 .sys-file{font-size:12.5px;max-width:100%;color:var(--text);}
+
+/* Show of the Week page */
+.sotw-login{max-width:440px;padding-top:12vh;}
+.sotw-weekbar{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin:16px 0 12px;}
+.sotw-weektitle{font-family:var(--font-display);font-size:18px;}
+.sotw-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px;}
+.sotw-card{display:flex;flex-direction:column;gap:10px;padding:14px;border-radius:14px;background:var(--panel);border:1px solid var(--border);box-shadow:var(--shadow);min-width:0;}
+.sotw-card.chosen{border:2px solid #e0a020;}
+.sotw-add{margin-top:12px;display:block;}
+.sotw-head{display:flex;gap:12px;align-items:flex-start;}
+.sotw-logo{flex:none;width:84px;height:84px;border-radius:10px;object-fit:cover;background:var(--chip);}
+.sotw-title{font-family:var(--font-display);font-size:16px;line-height:1.2;overflow-wrap:anywhere;margin-bottom:2px;}
+.sotw-badge{display:inline-block;margin-bottom:5px;padding:2px 8px;border-radius:9px;font-size:10.5px;font-weight:800;letter-spacing:.03em;text-transform:uppercase;background:#fff0cc;color:#8a5a00;}
+:root[data-theme="dark"] .sotw-badge{background:rgba(240,180,60,.15);color:#ffd27a;}
+.sotw-status{font-size:12px;color:var(--dim);line-height:1.4;}
+.sotw-live{color:var(--danger);font-weight:700;display:flex;align-items:center;gap:6px;}
+.sotw-dot{width:8px;height:8px;border-radius:50%;background:var(--danger);animation:sotwpulse 1.4s ease-in-out infinite;}
+@keyframes sotwpulse{50%{opacity:.25;}}
+.sotw-audio{display:block;width:100%;height:40px;margin-bottom:6px;}
+.sotw-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:auto;}
+.sotw-link{display:inline-flex;align-items:center;text-decoration:none;color:#fff;}
+.sotw-link:hover{color:#fff;}
+.sotw-swap{font-size:13px;}
+@media (max-width:760px){.sotw-swap{font-size:16px;}}

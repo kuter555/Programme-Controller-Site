@@ -466,6 +466,8 @@ function referencedImages() {
   const add = p => { if (p && /^\/uploads\//.test(p)) used.add(p.slice(9)); };
   db.listBookings().forEach(b => { add(b.icon); if (b.pendingChange) add(b.pendingChange.icon); });
   db.listArchives().forEach(a => { const d = db.getArchive(a.id).data; ((d && d.bookings) || []).forEach(b => add(b.icon)); });
+  // A shortlisted show's logo must still be downloadable even if the booking has since gone.
+  raw.prepare('SELECT icon FROM sotw_picks WHERE icon IS NOT NULL').all().forEach(r => add(r.icon));
   return used;
 }
 
@@ -481,7 +483,7 @@ function findPerson(email) {
     ((d && d.bookings) || []).forEach(b => { if ((b.email || '').toLowerCase() === email) archived.push(Object.assign({ archive: a.label }, b)); });
   });
   const log = raw.prepare('SELECT id, at, actor, action, summary FROM audit_log WHERE summary LIKE ? OR actor LIKE ? OR details LIKE ? ORDER BY id').all('%' + email + '%', '%' + email + '%', '%' + email + '%');
-  return { email, member, bookings, archived, log };
+  return { email, member, bookings, archived, log, showOfTheWeek: require('./show-of-week').picksForEmail(email) };
 }
 async function erasePerson(email, actor) {
   const p = findPerson(email);
@@ -503,7 +505,9 @@ async function erasePerson(email, actor) {
       raw.prepare('UPDATE audit_log SET summary = ?, actor = ?, details = ? WHERE id = ?').run(r.summary.replace(re, '[removed]'), r.actor.replace(re, '[removed]'), r.details ? r.details.replace(re, '[removed]') : null, row.id);
     });
   })();
-  const summary = 'Erased one person’s data: ' + (p.member ? 'member record deleted, ' : '') + p.bookings.length + ' bookings and ' + p.archived.length + ' archived bookings anonymised, ' + p.log.length + ' log entries cleaned';
+  // Their Show of the Week entries and any recording of them.
+  const sotwRemoved = require('./show-of-week').eraseEmail(p.email);
+  const summary = 'Erased one person’s data: ' + (p.member ? 'member record deleted, ' : '') + p.bookings.length + ' bookings and ' + p.archived.length + ' archived bookings anonymised, ' + sotwRemoved + ' Show of the Week entries and recordings deleted, ' + p.log.length + ' log entries cleaned';
   db.addAudit(actor, 'privacy.erase', summary + '. Backups made before this (newest: ' + safety.name + ') still hold it until they rotate out.');
   return { summary };
 }

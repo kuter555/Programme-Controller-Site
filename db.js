@@ -136,6 +136,43 @@ db.exec(`
   );
 `);
 
+// Show of the Week: each Mon-Sun week's shortlist and its recordings (show-of-week.js).
+db.exec(`
+  CREATE TABLE IF NOT EXISTS sotw_weeks (
+    week TEXT PRIMARY KEY,
+    drawn_at TEXT NOT NULL,
+    manual INTEGER NOT NULL DEFAULT 0
+  );
+  CREATE TABLE IF NOT EXISTS sotw_picks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    week TEXT NOT NULL,
+    booking_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    presenter TEXT NOT NULL DEFAULT '',
+    email TEXT,
+    icon TEXT,
+    category TEXT,
+    occ_date TEXT NOT NULL,
+    start_min INTEGER NOT NULL,
+    end_min INTEGER NOT NULL,
+    source TEXT NOT NULL DEFAULT 'auto',
+    chosen INTEGER NOT NULL DEFAULT 0,
+    rec_status TEXT NOT NULL DEFAULT 'scheduled',
+    rec_started TEXT,
+    rec_finished TEXT,
+    rec_expires TEXT,
+    rec_bytes INTEGER,
+    rec_kbps INTEGER,
+    rec_error TEXT,
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS sotw_picks_week ON sotw_picks (week);
+  CREATE TABLE IF NOT EXISTS sotw_sessions (
+    token_hash TEXT PRIMARY KEY,
+    expires INTEGER NOT NULL
+  );
+`);
+
 // Migrate older databases created before these columns existed.
 const existingCols = db.prepare("PRAGMA table_info(bookings)").all().map(c => c.name);
 if (!existingCols.includes('is_podcast')) db.exec("ALTER TABLE bookings ADD COLUMN is_podcast INTEGER NOT NULL DEFAULT 0");

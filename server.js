@@ -9,6 +9,7 @@ const express = require('express');
 const cookieParser = require('cookie-parser');
 const db = require('./db');
 const ops = require('./maintenance');
+const sotw = require('./show-of-week');
 
 const PORT = process.env.PORT || 3000;
 if (!process.env.ADMIN_PASSPHRASE) {
@@ -105,11 +106,13 @@ app.use(['/fonts', '/assets', '/uploads', '/api/now'], (req, res, next) => { res
 app.use('/uploads', express.static(uploadsDir));
 // Only the files the browser needs are public — never the server code, database, backups or notes.
 ['assets', 'fonts', 'vendor'].forEach(d => app.use('/' + d, express.static(path.join(__dirname, d), { dotfiles: 'deny' })));
-['app.js', 'style.css', 'listen-live.js', 'system-panel.js'].forEach(f => app.get('/' + f, (req, res) => res.sendFile(path.join(__dirname, f))));
+['app.js', 'style.css', 'listen-live.js', 'system-panel.js', 'show-of-the-week.js'].forEach(f => app.get('/' + f, (req, res) => res.sendFile(path.join(__dirname, f))));
 app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'index.html')));
 app.get('/index.html', (req, res) => res.sendFile(path.join(__dirname, 'index.html')));
 // The System page: backups, data retention, the yearly reset, logs and health checks.
 app.get('/system', (req, res) => res.sendFile(path.join(__dirname, 'system.html')));
+// The Show of the Week team's page. The page itself is empty; its API needs the password.
+app.get('/show-of-the-week', (req, res) => res.sendFile(path.join(__dirname, 'show-of-the-week.html')));
 // The same single-page app serves both addresses; it reads the path to decide what to
 // show: / = public view-only schedule (embeddable), /book = the full site incl. admin.
 app.get('/book', (req, res) => res.sendFile(path.join(__dirname, 'index.html')));
@@ -414,20 +417,23 @@ function loginLocked(ip) {
   return 0;
 }
 setInterval(() => { const now = Date.now(); loginFails.forEach((f, ip) => { if (now - f.first > LOGIN_WINDOW_MS && !(f.lockedUntil > now)) loginFails.delete(ip); }); }, 10 * 60 * 1000).unref();
+function noteLoginFail(ip) {
+  const f = loginFails.get(ip) || { n: 0, first: Date.now() };
+  f.n++;
+  if (f.n >= LOGIN_MAX_FAILS) {
+    f.lockedUntil = Date.now() + LOGIN_WINDOW_MS;
+    audit('public', 'admin.lockout', 'Sign-in locked for 15 minutes after ' + f.n + ' wrong passphrases', { ip });
+  }
+  loginFails.set(ip, f);
+  if (f.n === 3) audit('public', 'admin.login-failed', 'Several wrong passphrases entered', { ip });
+}
 app.post('/api/admin/login', (req, res) => {
   const ip = req.ip;
   const wait = loginLocked(ip);
   if (wait) return res.status(429).json({ error: 'Too many wrong passphrases — try again in ' + wait + ' minute' + (wait > 1 ? 's' : '') + '.' });
   const pass = (req.body && req.body.passphrase) || '';
   if (!db.checkAdminPassphrase(pass)) {
-    const f = loginFails.get(ip) || { n: 0, first: Date.now() };
-    f.n++;
-    if (f.n >= LOGIN_MAX_FAILS) {
-      f.lockedUntil = Date.now() + LOGIN_WINDOW_MS;
-      audit('public', 'admin.lockout', 'Admin sign-in locked for 15 minutes after ' + f.n + ' wrong passphrases', { ip });
-    }
-    loginFails.set(ip, f);
-    if (f.n === 3) audit('public', 'admin.login-failed', 'Several wrong admin passphrases entered', { ip });
+    noteLoginFail(ip);
     return res.status(401).json({ error: 'Incorrect passphrase.' });
   }
   loginFails.delete(ip);
@@ -786,6 +792,12 @@ sys.post('/passphrase', (req, res) => {
   res.json({ ok: true });
 });
 app.use('/api/system', sys);
+app.use('/api/sotw', sotw.router({
+  isAdminReq, requireAdmin, audit, loginLocked, noteLoginFail,
+  clearLoginFails: ip => loginFails.delete(ip),
+  startAdminSession: (req, res) => setSessionCookie(req, res, newSession()),
+  endAdminSession: (req, res) => { if (req.cookies[SESSION_COOKIE]) db.deleteSession(req.cookies[SESSION_COOKIE]); res.clearCookie(SESSION_COOKIE); }
+}));
 
 /* ---------- errors ---------- */
 app.use('/api', (req, res) => res.status(404).json({ error: 'Not found.' }));
@@ -810,4 +822,5 @@ process.on('uncaughtException', e => {
 }));
 
 ops.start();
+sotw.start();
 app.listen(PORT, () => console.log('URB Studio Booking listening on port ' + PORT));

@@ -1963,6 +1963,7 @@
               return h('button', { key: p[0], className: 'btn btn-sm' + (page === p[0] ? ' btn-primary' : ''), onClick: function () { this.openPage(p[0]); }.bind(this) }, p[1]);
             }, this),
             // Backups, logs, data retention and the yearly reset live on their own page.
+            h('a', { className: 'btn btn-sm urb-download', href: '/show-of-the-week', title: 'The weekly shortlist, recordings and logo download' }, 'Show of the Week ↗'),
             h('a', { className: 'btn btn-sm urb-download', href: '/system', title: 'Backups, activity log, data retention, yearly reset and health checks' }, 'System ↗')
           ) : null,
 

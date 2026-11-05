@@ -22,7 +22,7 @@
     ['', 'Everything'], ['booking.', 'Bookings'], ['member.', 'Members'], ['admin.', 'Admin sign-ins'],
     ['backup.', 'Backups & restores'], ['reset.', 'Yearly reset'], ['retention.', 'Data clean-up'], ['privacy.', 'Privacy requests'],
     ['health.', 'Health warnings'], ['error.', 'Errors'], ['config.', 'Config changes'], ['settings.', 'Booking limits'],
-    ['category.', 'Show types'], ['equipment.', 'Equipment'], ['server.', 'Server start/stop']
+    ['category.', 'Show types'], ['sotw.', 'Show of the Week'], ['equipment.', 'Equipment'], ['server.', 'Server start/stop']
   ];
   var STUDIOS = { 1: 'Studio One', 2: 'Studio Two', 3: 'Roadshow' };
   var WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];

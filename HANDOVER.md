@@ -12,6 +12,9 @@ This guide is for whoever looks after the booking site next. **Most problems can
 | Personal data clean-up (old emails/names, inactive members, unused images) | Nightly | System → Data & privacy |
 | Schedule archived and cleared for the new year | 1 September, 04:00 | System → Yearly reset & archives |
 | Health checks (domain, DNS, HTTPS, stream, disk, Node.js, …) | Every 6 hours | System → Health |
+| Show of the Week: 3 Studio One shows drawn for the coming week | Every Sunday | `/show-of-the-week` |
+| Show of the Week: 15 minutes recorded from the middle of each | While each show airs | `/show-of-the-week` |
+| Show of the Week: recordings deleted | 2 weeks after recording | Activity log |
 | Missing or damaged database replaced with the newest good backup | Every start-up | Activity log ("recovery") |
 | Show images that go missing copied back from backups | Every start-up and nightly | Activity log |
 
@@ -44,6 +47,15 @@ Everything people do (bookings, approvals, deletions, sign-ins, settings) and ev
 | Health says the HTTPS certificate is expiring | Needs server access: `sudo certbot renew`, then `sudo systemctl reload nginx`. |
 | Health says Node.js is reaching end of life | Needs server access: see "Upgrading Node.js". |
 | Health says "Auto-restart: not running under systemd" | Needs server access: install the service (see below). Otherwise the site stays down after a crash or reboot until someone restarts it by hand. |
+
+## Show of the Week
+
+The team's page is `https://<site>/show-of-the-week`. To set or change its password, sign in with the admin passphrase; the setting is at the bottom of the page. Changing it signs the team out.
+
+- **The draw** only uses Studio One, and skips the Podcast recording and Training show types (`SKIP_CATEGORIES` in `show-of-week.js`). It avoids shows shortlisted in the previous 4 weeks when there's a choice.
+- **Swapping a show or using Re-draw** turns the automatic top-up off for that week, so the site won't undo a hand-made choice.
+- **Recordings** are the stream's 64kbps MP3 where available (about 7MB per show), in `data/sotw-recordings/`. They aren't in backups, on purpose: they're only meant to last 2 weeks.
+- **If a recording is missing**, the server was probably off during that slot, or the stream was down. The Activity log (filter: Show of the Week) gives the reason.
 
 ## Set up a free uptime monitor
 
@@ -121,6 +133,8 @@ Set `BACKUP_MIRROR_DIR=/path/to/other/disk/urb-backups` in `.env` and restart. E
 | Email on a booking | 12 months after the show's last date |
 | Presenter name on a booking or archive | 5 years after the show's last date |
 | Emails and IP addresses in the activity log | 12 months (the entry itself is kept) |
-| Backups (contain all of the above) | At most about 13 months, then deleted automatically |
+| Show of the Week recordings (presenters' voices) | 2 weeks after recording, or until erased on request |
+| Show of the Week shortlist (show and presenter names, email) | 12 weeks |
+| Backups (contain all of the above except the recordings) | At most about 13 months, then deleted automatically |
 
 The public schedule and the Listen Live feed never send presenters' email addresses to the browser.
