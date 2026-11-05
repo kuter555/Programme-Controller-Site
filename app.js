@@ -236,6 +236,28 @@
       }
       return b.date === ds;
     }
+    // Is the airing of b that starts on ds marked "No show", or replaced by a one-week override? (mirrors isOffAir in db.js)
+    isOffAir(b, ds) {
+      if ((b.skipDates || []).indexOf(ds) >= 0) return true;
+      if (b.takeover) return false;
+      var s = dayNum(ds) * 1440 + b.startMin, e = dayNum(ds) * 1440 + b.endMin;
+      return this.state.bookings.some(function (t) {
+        return t.takeover && t.studio === b.studio && !t.pendingApproval && s < absEnd(t) && absStart(t) < e;
+      });
+    }
+    // The airings a one-week override takes off the schedule, earliest first. Works from
+    // the form's unsaved values, so the list stays right as the times are changed.
+    showsReplacedBy(f) {
+      var fs = absStart(f), fe = absEnd(f), first = dayNum(f.date), base = this.parse(f.date), out = [];
+      this.state.bookings.forEach(function (b) {
+        if (b.id === f.id || b.studio !== f.studio || b.takeover || b.pendingApproval) return;
+        for (var n = first - extraDays(b); n <= first + extraDays(f); n++) {
+          var ds = this.fmt(this.addDays(base, n - first));
+          if (this.startsOn(b, ds) && (b.skipDates || []).indexOf(ds) < 0 && n * 1440 + b.startMin < fe && fs < n * 1440 + b.endMin) out.push({ booking: b, date: ds, at: n * 1440 + b.startMin });
+        }
+      }, this);
+      return out.sort(function (a, b) { return a.at - b.at; });
+    }
     // The pieces of each booking that fall on day ds, clipped to 00:00–24:00.
     // A booking that runs past midnight shows up on every day it touches.
     segmentsOn(list, ds) {
@@ -243,10 +265,11 @@
       var d = this.parse(ds);
       list.forEach(function (b) {
         for (var k = 0, n = extraDays(b); k <= n; k++) {
-          if (!this.startsOn(b, k ? this.fmt(this.addDays(d, -k)) : ds)) continue;
+          var startDate = k ? this.fmt(this.addDays(d, -k)) : ds;
+          if (!this.startsOn(b, startDate) || this.isOffAir(b, startDate)) continue;
           var s = b.startMin - k * 1440, e = b.endMin - k * 1440;
           if (e <= 0 || s >= 1440) continue;
-          out.push({ booking: b, date: ds, startMin: Math.max(0, s), endMin: Math.min(1440, e), contBefore: s < 0, contAfter: e > 1440 });
+          out.push({ booking: b, date: ds, startDate: startDate, startMin: Math.max(0, s), endMin: Math.min(1440, e), contBefore: s < 0, contAfter: e > 1440 });
         }
       }, this);
       out.sort(function (a, b) { return a.startMin - b.startMin || a.endMin - b.endMin; });
@@ -274,7 +297,13 @@
     }
     // The first existing booking this form would sit on top of, or null.
     findClash(form) {
-      var list = this.state.bookings.filter(function (b) { return b.studio === form.studio && b.id !== form.id && !b.pendingApproval; });
+      var weekly = form.repeat === 'weekly' || form.repeatRequest;
+      var list = this.state.bookings.filter(function (b) {
+        if (b.studio !== form.studio || b.id === form.id || b.pendingApproval) return false;
+        // An override only has to avoid other overrides. A weekly slot just goes off air
+        // for the week an override covers, so an override never blocks one.
+        return form.takeover ? b.takeover : !(weekly && b.takeover);
+      });
       var dates = this.checkDates(form);
       for (var i = 0; i < dates.length; i++) {
         var d = this.parse(dates[i]);
@@ -290,7 +319,7 @@
     // Has an edit moved the booking from where it already was?
     slotChanged(f) {
       var o = f.orig;
-      return !o || o.date !== f.date || o.startMin !== f.startMin || o.endMin !== f.endMin || o.repeat !== f.repeat;
+      return !o || o.date !== f.date || o.startMin !== f.startMin || o.endMin !== f.endMin || o.repeat !== f.repeat || !!o.takeover !== !!f.takeover;
     }
     canBook() { return MODE !== 'view'; }
     // Who can be picked in "Booked by": admins see every approved member, the
@@ -348,8 +377,47 @@
       var cat = b.category ? (categoryOf(b.category) || {}).key : (b.isPodcast ? 'podcast' : null);
       this.setState({
         modal: 'booking', formError: '', registering: false, canOverride: false,
-        form: { id: b.id, studio: b.studio, title: b.title, memberId: null, name: b.name, email: b.email, description: b.description || '', admin: b.admin, repeat: b.repeat, repeatRequest: !!b.pendingRepeat, category: cat || null, icon: b.icon || null, items: (b.items || []).slice(), color: b.color || null, date: b.date, startMin: b.startMin, endMin: b.endMin, repeatUntil: b.repeatUntil, orig: { date: b.date, startMin: b.startMin, endMin: b.endMin, repeat: b.repeat } }
+        form: { id: b.id, studio: b.studio, title: b.title, memberId: null, name: b.name, email: b.email, description: b.description || '', admin: b.admin, repeat: b.repeat, repeatRequest: !!b.pendingRepeat, category: cat || null, icon: b.icon || null, items: (b.items || []).slice(), color: b.color || null, date: b.date, startMin: b.startMin, endMin: b.endMin, repeatUntil: b.repeatUntil, takeover: !!b.takeover, occDate: o.startDate || null, orig: { date: b.date, startMin: b.startMin, endMin: b.endMin, repeat: b.repeat, takeover: !!b.takeover } }
       });
+    }
+    // From an open weekly show: a new one-off override for that one airing, starting from
+    // the show's own details. The weekly booking itself is left alone.
+    overrideThisWeek() {
+      var f = this.state.form;
+      this.setState({ formError: '', canOverride: false, form: Object.assign({}, f, { id: null, admin: true, repeat: 'none', repeatRequest: false, repeatUntil: null, date: f.occDate, occDate: null, takeover: true, orig: null }) });
+    }
+    // From the Admin panel: a blank override in the studio and week being looked at (never in the past).
+    newOverride() {
+      var today = this.stripTime(new Date());
+      var week = this.state.weekStart;
+      var studio = this.state.studio === 2 ? 2 : 1;
+      this.openNew(studio, week && week > today ? week : today, studio === 1 ? 12 * 60 + 10 : 12 * 60, studio === 1 ? 13 * 60 + 10 : 13 * 60, []);
+      this.setField('takeover', true);
+    }
+    // Takes one airing of a weekly show off with no replacement, or puts it back.
+    setNoShow(id, date, off) {
+      if (!off) {
+        // The slot may have been booked in the meantime, and the two shouldn't end up on top of each other.
+        var show = this.state.bookings.find(function (x) { return x.id === id; });
+        var clash = show && this.findClash(Object.assign({}, show, { date: date, repeat: 'none', repeatRequest: false }));
+        if (clash) return this.flashAdminError('Can’t put ' + show.title + ' back: “' + clash.booking.title + '” is booked in that slot. Move or delete it first.');
+      }
+      this.setState({ saving: true });
+      return api('POST', '/api/admin/bookings/' + encodeURIComponent(id) + '/no-show', { date: date, off: off }).then(function (saved) {
+        this.setState({ saving: false });
+        this.persist(this.state.bookings.map(function (x) { return x.id === saved.id ? saved : x; }));
+        if (off) this.closeModal();
+      }.bind(this)).catch(function (e) {
+        this.setState({ saving: false });
+        if (off) this.setState({ formError: 'Could not save: ' + e.message });
+        else this.flashAdminError('Could not put the show back: ' + e.message);
+      }.bind(this));
+    }
+    removeOverride(b) {
+      if (!window.confirm('Remove the override “' + b.title + '”? Any shows it replaced go back on the schedule.')) return;
+      api('DELETE', '/api/admin/bookings/' + encodeURIComponent(b.id)).then(function () {
+        this.persist(this.state.bookings.filter(function (x) { return x.id !== b.id; }));
+      }.bind(this)).catch(function (e) { this.flashAdminError('Could not remove the override: ' + e.message); }.bind(this));
     }
     setField(k, v) { this.setState(function (s) { var f = Object.assign({}, s.form); f[k] = v; return { form: f }; }); }
     closeModal() { this.setState({ modal: null, form: null, formError: '', viewNotice: '', registering: false, regSubmitted: false, saving: false, viewBooking: null, canOverride: false, crop: null }); }
@@ -386,7 +454,7 @@
       var me = this.state.members.find(function (m) { return m.email.toLowerCase() === email.toLowerCase(); });
       var key = me && me.ownerKey;
       this.state.bookings.forEach(function (b) {
-        if (b.studio !== 2 || b.repeat === 'weekly' || b.pendingApproval || b.id === excludeId) return;
+        if (b.studio !== 2 || b.repeat === 'weekly' || b.pendingApproval || b.takeover || b.id === excludeId) return;
         if (key && b.ownerKey ? b.ownerKey !== key : b.email.toLowerCase() !== email.toLowerCase()) return;
         var d = this.parse(b.date);
         if (d < weekStart || d > weekEnd) return;
@@ -423,7 +491,8 @@
         var c = this.findClash(f);
         if (c) {
           var cd = this.parse(c.date);
-          return 'That overlaps “' + c.booking.title + '” (' + c.booking.name + ') on ' + DAYS[(cd.getDay() + 6) % 7] + ' ' + cd.getDate() + '/' + (cd.getMonth() + 1) + ', ' + this.rangeLabel(c.booking) + '.';
+          var canTakeOver = admin && f.repeat !== 'weekly' && !f.takeover && !c.booking.takeover;
+          return 'That overlaps “' + c.booking.title + '” (' + c.booking.name + ') on ' + DAYS[(cd.getDay() + 6) % 7] + ' ' + cd.getDate() + '/' + (cd.getMonth() + 1) + ', ' + this.rangeLabel(c.booking) + '.' + (canTakeOver ? ' To replace it for this week only, switch on “One-week override”.' : '');
         }
       }
       return null;
@@ -449,7 +518,7 @@
         }
       }
 
-      var rec = { id: f.id || ('b' + Date.now() + Math.floor(Math.random() * 999)), studio: f.studio, title: f.title.trim(), name: f.name.trim(), email: f.email.trim(), description: f.description.trim(), admin: !!f.admin && this.state.admin, repeat: f.studio === 3 ? 'none' : f.repeat, pendingRepeat: memberRequest, category: f.studio === 3 ? null : f.category, isPodcast: f.studio !== 3 && f.category === 'podcast', icon: f.studio === 3 ? null : (f.icon || null), items: f.studio === 3 ? f.items : [], color: f.studio === 3 ? (f.color || null) : null, date: f.date, startMin: f.startMin, endMin: f.endMin, repeatUntil: f.repeatUntil || null, overrideRequest: overLimit && !!overrideRequest };
+      var rec = { id: f.id || ('b' + Date.now() + Math.floor(Math.random() * 999)), studio: f.studio, title: f.title.trim(), name: f.name.trim(), email: f.email.trim(), description: f.description.trim(), admin: !!f.admin && this.state.admin, repeat: f.studio === 3 ? 'none' : f.repeat, pendingRepeat: memberRequest, category: f.studio === 3 ? null : f.category, isPodcast: f.studio !== 3 && f.category === 'podcast', icon: f.studio === 3 ? null : (f.icon || null), items: f.studio === 3 ? f.items : [], color: f.studio === 3 ? (f.color || null) : null, date: f.date, startMin: f.startMin, endMin: f.endMin, repeatUntil: f.repeatUntil || null, overrideRequest: overLimit && !!overrideRequest, takeover: this.state.admin && !!f.takeover && f.studio !== 3 && f.repeat !== 'weekly' };
       this.setState({ saving: true, formError: '', canOverride: false });
       var req = this.state.admin ? api('POST', '/api/admin/bookings', rec) : api('POST', '/api/bookings', rec);
       req.then(function (saved) {
@@ -1052,6 +1121,7 @@
         if (b.pendingCancel) meta.push(h('span', { key: 'x', title: 'Cancellation requested' }, '🚫'));
         if (b.pendingChange) meta.push(h('span', { key: 'c', title: 'Change requested — awaiting approval' }, '✎'));
         if (locked) meta.push(h('span', { key: 'l', title: 'Admin booking' }, '🔒'));
+        if (b.takeover) meta.push(h('span', { key: 'o', title: 'One-week override: replaces the regular shows in this slot' }, '★'));
       }
       var children = [
         h('div', { key: 'h', className: 'urb-block-head' },
@@ -1297,7 +1367,7 @@
         h('div', { className: 'urb-card urb-pop', onClick: function (e) { e.stopPropagation(); } },
           h('div', { className: 'urb-card-head' },
             h('span', null, f.id ? '✎' : '＋'),
-            h('div', { className: 'urb-card-head-title' }, f.id ? 'Edit booking' : 'New booking'),
+            h('div', { className: 'urb-card-head-title' }, f.takeover ? (f.id ? 'Edit one-week override' : 'New one-week override') : (f.id ? 'Edit booking' : 'New booking')),
             h('div', { style: { flex: 1 } }),
             h('div', { style: { fontSize: '12px', fontWeight: 600, color: '#9cceff' } }, STUDIO_NAMES[f.studio])
           ),
@@ -1324,21 +1394,49 @@
                   h('input', { type: 'radio', name: 'btype', checked: isWeekly, onChange: function () { this.setBookingType(true); }.bind(this) }), 'Weekly Slot')
               )
             ),
+            this.renderOverrideField(f, isRoadshow, isWeekly),
             this.state.formError ? h('div', { className: 'urb-error-box' }, this.state.formError) : null,
             h('div', { className: 'urb-actions' },
               f.id ? h('button', { className: this.btnClass('danger'), disabled: this.state.saving, onClick: this.deleteBooking.bind(this) }, 'Delete') : null,
+              this.state.admin && f.id && f.repeat === 'weekly' && f.occDate && !isRoadshow
+                ? h('button', { className: this.btnClass('ghost'), disabled: this.state.saving, onClick: this.overrideThisWeek.bind(this) }, 'Override ' + this.shortDay(f.occDate) + ' only')
+                : null,
+              this.state.admin && f.id && f.repeat === 'weekly' && f.occDate && !isRoadshow
+                ? h('button', { className: this.btnClass('ghost'), disabled: this.state.saving, onClick: function () { this.setNoShow(f.id, f.occDate, true); }.bind(this) }, 'No show ' + this.shortDay(f.occDate))
+                : null,
               h('div', { style: { flex: 1 } }),
               h('button', { className: this.btnClass('ghost'), onClick: this.closeModal.bind(this) }, 'Close'),
               this.state.canOverride ? h('button', { className: this.btnClass('ghost'), disabled: this.state.saving, onClick: function () { this.saveBooking(true); }.bind(this) }, 'Request admin override') : null,
-              h('button', { className: this.btnClass('primary'), disabled: this.state.saving, onClick: function () { this.saveBooking(false); }.bind(this) }, this.state.saving ? 'Saving…' : (f.id ? 'Save changes' : 'Create booking'))
+              h('button', { className: this.btnClass('primary'), disabled: this.state.saving, onClick: function () { this.saveBooking(false); }.bind(this) }, this.state.saving ? 'Saving…' : (f.id ? 'Save changes' : f.takeover ? 'Create override' : 'Create booking'))
             )
           )
         )
       );
     }
+    // Admin only, for one-off radio and DJ bookings. Says exactly what goes off air before it's saved.
+    renderOverrideField(f, isRoadshow, isWeekly) {
+      if (!this.state.admin || isRoadshow || isWeekly) return null;
+      var replaced = f.takeover ? this.showsReplacedBy(f) : [];
+      return h('div', { className: 'urb-field' },
+        h('label', { className: 'urb-switch' },
+          h('input', { type: 'checkbox', checked: !!f.takeover, onChange: function (e) { this.setField('takeover', e.target.checked); this.setState({ formError: '' }); }.bind(this) }),
+          h('span', { className: 'urb-switch-track' }),
+          h('span', { className: 'urb-switch-label' }, 'One-week override')
+        ),
+        f.takeover ? h('div', { className: 'urb-row-sub urb-override-note' },
+          replaced.length
+            ? [h('div', { key: 'h' }, 'Off air while this runs. They come back the following week, or straight away if this is deleted:'),
+               h('ul', { key: 'l' }, replaced.map(function (r) { return h('li', { key: r.booking.id + r.date }, r.booking.title + ' · ' + this.shortDay(r.date) + ' ' + this.minLabel(r.booking.startMin)); }, this))]
+            : 'No shows in this slot right now. Anything else booked here will be off air while this runs.'
+        ) : null
+      );
+    }
+    shortDay(ds) { var d = this.parse(ds); return DAYS[(d.getDay() + 6) % 7] + ' ' + d.getDate() + '/' + (d.getMonth() + 1); }
     setBookingType(weekly) {
-      if (this.state.admin) this.setField('repeat', weekly ? 'weekly' : 'none');
-      else this.setField('repeatRequest', weekly);
+      if (this.state.admin) {
+        this.setField('repeat', weekly ? 'weekly' : 'none');
+        if (weekly) this.setField('takeover', false);
+      } else this.setField('repeatRequest', weekly);
       this.setState({ canOverride: false, formError: '' });
     }
     dayHeading(f) {
@@ -1642,6 +1740,43 @@
       ];
       var full = sections.filter(function (sec) { return sec[2].length; });
       var empty = sections.filter(function (sec) { return !sec[2].length; });
+      // Overrides that haven't finished yet, soonest first.
+      var todayAbs = dayNum(this.fmt(new Date())) * 1440;
+      var takeovers = this.state.bookings.filter(function (b) { return b.takeover && absEnd(b) > todayAbs; })
+        .sort(function (a, b) { return absStart(a) - absStart(b); });
+      var takeoverRow = function (b) {
+        var replaced = this.showsReplacedBy(b);
+        return h('div', { key: b.id, className: 'urb-req-row' },
+          h('div', { style: { flex: 1, minWidth: 0 } },
+            h('div', { className: 'urb-row-title' }, b.title + ' — ' + STUDIO_NAMES[b.studio]),
+            h('div', { className: 'urb-row-sub' }, (b.endMin > 1440 ? '' : this.shortDay(b.date) + ' · ') + this.rangeLabel(b)),
+            h('div', { className: 'urb-row-sub' }, replaced.length
+              ? 'Replaces: ' + replaced.map(function (r) { return r.booking.title; }).join(', ')
+              : 'Not replacing any shows')
+          ),
+          h('button', { className: this.btnClass('ghost'), onClick: function () { this.openEdit({ booking: b }); }.bind(this) }, 'Edit'),
+          h('button', { className: this.btnClass('danger'), onClick: function () { this.removeOverride(b); }.bind(this) }, 'Remove')
+        );
+      }.bind(this);
+      // Weeks a show is off with no replacement. They aren't on the grid, so this is the way back.
+      var noShows = [];
+      this.state.bookings.forEach(function (b) {
+        (b.skipDates || []).forEach(function (d) {
+          if (this.startsOn(b, d) && dayNum(d) * 1440 + b.endMin > todayAbs) noShows.push({ booking: b, date: d });
+        }, this);
+      }, this);
+      noShows.sort(function (x, y) { return dayNum(x.date) * 1440 + x.booking.startMin - (dayNum(y.date) * 1440 + y.booking.startMin); });
+      var noShowRow = function (n) {
+        var b = n.booking;
+        return h('div', { key: b.id + n.date, className: 'urb-req-row' },
+          h('div', { style: { flex: 1, minWidth: 0 } },
+            h('div', { className: 'urb-row-title' }, b.title + ' — ' + STUDIO_NAMES[b.studio]),
+            h('div', { className: 'urb-row-sub' }, 'No show ' + this.shortDay(n.date) + ' · ' + this.rangeLabel(Object.assign({}, b, { date: n.date })))
+          ),
+          h('button', { className: this.btnClass('ghost'), onClick: function () { this.setNoShow(b.id, n.date, false); }.bind(this) }, 'Put back')
+        );
+      }.bind(this);
+      var weekChanges = takeovers.length + noShows.length;
 
       return h('div', { className: 'urb-admin-panel' },
         h('div', { className: 'urb-admin-title' }, 'Admin'),
@@ -1655,7 +1790,16 @@
         empty.length ? h('div', { className: 'urb-admin-empty' + (full.length ? '' : ' alone') },
           h('span', { className: 'urb-admin-empty-label' }, full.length ? 'Nothing pending:' : '✓ Nothing pending'),
           full.length ? empty.map(function (sec) { return h('span', { key: sec[0], className: 'urb-tag' }, sec[1]); }) : null
-        ) : null
+        ) : null,
+        h('div', { className: 'urb-admin-section' },
+          h('div', { className: 'urb-page-title-row' },
+            h('div', { className: 'urb-row-title' }, 'One-week overrides' + (weekChanges ? ' (' + weekChanges + ')' : '')),
+            h('button', { className: 'btn btn-sm', onClick: this.newOverride.bind(this) }, '＋ New override')
+          ),
+          h('div', { className: 'urb-row-sub', style: { marginBottom: '8px' } }, 'Replace shows for a single week, e.g. a 24-hour show. The regular shows come back by themselves afterwards. To replace one show, or take it off for a week with no replacement, click it on the schedule.'),
+          takeovers.map(takeoverRow),
+          noShows.map(noShowRow)
+        )
       );
     }
     setMediaMember(m, value) {

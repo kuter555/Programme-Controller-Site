@@ -63,12 +63,12 @@ function startsOn(b, ds) {
   if (b.repeat === 'weekly') return ds >= b.date && (!b.repeatUntil || ds <= b.repeatUntil) && (dayIndex(ds) - dayIndex(b.date)) % 7 === 0;
   return b.date === ds;
 }
-// This booking's airings in a Mon–Sun week.
+// This booking's airings in a Mon–Sun week, leaving out any marked "No show" or replaced by a one-week override.
 function instancesIn(b, week) {
   const out = [];
   for (let k = 0; k < 7; k++) {
     const ds = shiftDate(week, k);
-    if (startsOn(b, ds)) {
+    if (startsOn(b, ds) && !db.isOffAir(b, ds)) {
       const base = dayIndex(ds) * 1440;
       out.push({ date: ds, startMin: b.startMin, endMin: b.endMin, window: midWindow(base + b.startMin, base + b.endMin) });
     }

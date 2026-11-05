@@ -83,7 +83,7 @@ function bookingLabel(b) {
 // Which fields an edit changed, for the log.
 function bookingDiff(before, after) {
   const out = {};
-  ['studio', 'title', 'name', 'email', 'description', 'date', 'startMin', 'endMin', 'repeat', 'repeatUntil', 'category', 'icon', 'items', 'admin'].forEach(k => {
+  ['studio', 'title', 'name', 'email', 'description', 'date', 'startMin', 'endMin', 'repeat', 'repeatUntil', 'category', 'icon', 'items', 'admin', 'takeover'].forEach(k => {
     const a = before ? before[k] : undefined, b = after[k];
     if (JSON.stringify(a == null ? null : a) !== JSON.stringify(b == null ? null : b)) out[k] = [a == null ? null : a, b == null ? null : b];
   });
@@ -201,7 +201,7 @@ function radioInstances(today) {
     const span = Math.max(0, Math.ceil(b.endMin / 1440) - 1);
     for (let k = -1 - span; k <= 1; k++) {
       const ds = shiftDate(today, k);
-      if (startsOn(b, ds)) out.push({ b, start: dayIndex(ds) * 1440 + b.startMin, end: dayIndex(ds) * 1440 + b.endMin });
+      if (startsOn(b, ds) && !db.isOffAir(b, ds)) out.push({ b, start: dayIndex(ds) * 1440 + b.startMin, end: dayIndex(ds) * 1440 + b.endMin });
     }
   });
   return out.sort((x, y) => x.start - y.start);
@@ -333,7 +333,7 @@ app.post('/api/bookings', (req, res) => {
   if (!who || !who.approved) return res.status(400).json({ error: 'Please select who this booking is for.' });
   if (!who.mediaMember) return res.status(403).json({ error: 'Only media members can book. If you think you should be one, ask an admin.' });
   b.name = who.name; b.email = who.email;
-  b.admin = false; b.repeat = 'none'; b.repeatUntil = null; b.pendingCancel = false;
+  b.admin = false; b.repeat = 'none'; b.repeatUntil = null; b.pendingCancel = false; b.takeover = false;
 
   if (b.studio === 3) {
     const rErr = checkRoadshow(b);
@@ -464,8 +464,10 @@ app.post('/api/admin/bookings', requireAdmin, (req, res) => {
     const rErr = checkRoadshow(b);
     if (rErr) return res.status(400).json({ error: rErr });
   }
+  // Only a one-off radio or DJ booking can be a one-week override.
+  b.takeover = !!b.takeover && b.studio !== 3 && b.repeat !== 'weekly' && !b.pendingRepeat;
   const saved = db.upsertBooking(b);
-  if (!existing) audit('admin', 'booking.create', 'Admin booked ' + bookingLabel(saved) + ' for ' + saved.name, { booking: saved });
+  if (!existing) audit('admin', 'booking.create', 'Admin booked ' + (saved.takeover ? 'one-week override ' : '') + bookingLabel(saved) + ' for ' + saved.name, { booking: saved });
   else {
     const diff = bookingDiff(existing, saved);
     const what = existing.pendingRepeat && !saved.pendingRepeat ? (saved.repeat === 'weekly' ? 'Approved weekly repeat for ' : 'Declined weekly repeat for ') : 'Edited ';
@@ -496,6 +498,19 @@ app.post('/api/admin/bookings/:id/approve-override', requireAdmin, (req, res) =>
   res.json(db.upsertBooking(b));
 });
 app.post('/api/admin/bookings/:id/deny-override', requireAdmin, (req, res) => deleteWithLog(req, res, 'booking.override-denied', 'Denied DJ-limit override for'));
+// Takes one airing of a weekly show off the schedule with no replacement, or puts it back.
+app.post('/api/admin/bookings/:id/no-show', requireAdmin, (req, res) => {
+  const b = db.getBooking(req.params.id);
+  if (!b) return res.status(404).json({ error: 'Not found.' });
+  const date = String((req.body && req.body.date) || '');
+  const off = !!(req.body && req.body.off);
+  if (b.repeat !== 'weekly') return res.status(400).json({ error: 'Only weekly shows can be taken off for one week.' });
+  if (!DATE_RE.test(date) || (off && !startsOn(b, date))) return res.status(400).json({ error: 'This show doesn’t air on that date.' });
+  const rest = b.skipDates.filter(d => d !== date);
+  db.setSkipDates(b.id, off ? rest.concat(date).sort() : rest);
+  audit('admin', off ? 'booking.no-show' : 'booking.no-show-undone', (off ? 'Marked no show on ' + date + ' for ' : 'Put back ' + date + ' for ') + bookingLabel(b));
+  res.json(db.getBooking(b.id));
+});
 
 // Apply a member's requested change. Moving a weekly show to a later date splits
 // the series: earlier weeks keep the old details, the new series starts on the
@@ -514,6 +529,7 @@ app.post('/api/admin/bookings/:id/approve-change', requireAdmin, (req, res) => {
     updated.id = 'b' + Date.now() + crypto.randomBytes(2).toString('hex');
     updated.pendingCancel = false;
     db.upsertBooking(updated);
+    db.setSkipDates(updated.id, b.skipDates.filter(d => d >= c.date));
   } else {
     db.upsertBooking(updated);
   }

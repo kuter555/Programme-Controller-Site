@@ -576,6 +576,7 @@ function undoArchive(id, actor) {
       if (db.getBooking(b.id)) return;
       db.upsertBooking(b);
       if (b.pendingChange) db.setPendingChange(b.id, b.pendingChange);
+      if (b.skipDates) db.setSkipDates(b.id, b.skipDates);
       restored++;
     });
     (a.data.clearedMedia || []).forEach(mid => raw.prepare('UPDATE members SET media_member = 1 WHERE id = ?').run(mid));

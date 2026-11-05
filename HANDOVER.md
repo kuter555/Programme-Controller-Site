@@ -48,6 +48,15 @@ Everything people do (bookings, approvals, deletions, sign-ins, settings) and ev
 | Health says Node.js is reaching end of life | Needs server access: see "Upgrading Node.js". |
 | Health says "Auto-restart: not running under systemd" | Needs server access: install the service (see below). Otherwise the site stays down after a crash or reboot until someone restarts it by hand. |
 
+## One-week overrides
+
+Use these when something replaces the regular shows for one week, such as a 24-hour show. On the Schedule tab, under **Admin → One-week overrides**, click **New override**. To replace a single show, click it on the schedule and choose **Override … only**.
+
+- The form lists which shows go off air before you save. Overrides only affect their own studio.
+- Replaced shows disappear from the schedule, Listen Live and the Show of the Week draw for that week. Their weekly bookings aren't changed, so they come back by themselves.
+- **Removing an override** puts the shows back straight away. Members can't book over an override.
+- **For a week off with nothing replacing it**, click the weekly show on the schedule and choose **No show**. The show is then listed under One-week overrides with a **Put back** button, and the slot is free to book that week.
+
 ## Show of the Week
 
 The team's page is `https://<site>/show-of-the-week`. To set or change its password, sign in with the admin passphrase; the setting is at the bottom of the page. Changing it signs the team out.

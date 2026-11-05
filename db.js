@@ -181,6 +181,10 @@ if (!existingCols.includes('icon')) db.exec("ALTER TABLE bookings ADD COLUMN ico
 if (!existingCols.includes('pending_approval')) db.exec("ALTER TABLE bookings ADD COLUMN pending_approval INTEGER NOT NULL DEFAULT 0");
 // Roadshow (studio 3) bookings reserve equipment rather than a room: JSON array of equipment ids.
 if (!existingCols.includes('items')) db.exec("ALTER TABLE bookings ADD COLUMN items TEXT");
+// A one-week override: a one-off admin booking that takes other shows in its studio off air while it runs.
+if (!existingCols.includes('takeover')) db.exec("ALTER TABLE bookings ADD COLUMN takeover INTEGER NOT NULL DEFAULT 0");
+// Dates a weekly show is off with no replacement ("No show"), as a JSON array of YYYY-MM-DD.
+if (!existingCols.includes('skip_dates')) db.exec("ALTER TABLE bookings ADD COLUMN skip_dates TEXT");
 // Show type (flagship, training, …) — drives the booking's colour on the grid.
 // A member's proposed edit (name/description/image/time) waiting for admin approval, as JSON.
 // Kept separate from the live fields so the schedule doesn't change until it's approved.
@@ -351,7 +355,8 @@ function rowToBooking(r) {
     isPodcast: !!r.is_podcast, pendingCancel: !!r.pending_cancel,
     pendingApproval: !!r.pending_approval, icon: r.icon || null,
     items: parseItems(r.items), category: r.category || null,
-    pendingChange: parseJson(r.pending_change)
+    pendingChange: parseJson(r.pending_change), takeover: !!r.takeover,
+    skipDates: parseJson(r.skip_dates) || []
   };
 }
 function rowToMember(r) {
@@ -368,15 +373,15 @@ function getBooking(id) {
 }
 function upsertBooking(b) {
   db.prepare(`
-    INSERT INTO bookings (id, studio, title, name, email, description, is_admin, repeat, pending_repeat, color, date, start_min, end_min, repeat_until, is_podcast, pending_cancel, pending_approval, icon, items, category)
-    VALUES (@id, @studio, @title, @name, @email, @description, @isAdmin, @repeat, @pendingRepeat, @color, @date, @startMin, @endMin, @repeatUntil, @isPodcast, @pendingCancel, @pendingApproval, @icon, @items, @category)
+    INSERT INTO bookings (id, studio, title, name, email, description, is_admin, repeat, pending_repeat, color, date, start_min, end_min, repeat_until, is_podcast, pending_cancel, pending_approval, icon, items, category, takeover)
+    VALUES (@id, @studio, @title, @name, @email, @description, @isAdmin, @repeat, @pendingRepeat, @color, @date, @startMin, @endMin, @repeatUntil, @isPodcast, @pendingCancel, @pendingApproval, @icon, @items, @category, @takeover)
     ON CONFLICT(id) DO UPDATE SET
       studio=excluded.studio, title=excluded.title, name=excluded.name, email=excluded.email,
       description=excluded.description, is_admin=excluded.is_admin, repeat=excluded.repeat,
       pending_repeat=excluded.pending_repeat, color=excluded.color, date=excluded.date,
       start_min=excluded.start_min, end_min=excluded.end_min, repeat_until=excluded.repeat_until,
       is_podcast=excluded.is_podcast, pending_cancel=excluded.pending_cancel, pending_approval=excluded.pending_approval,
-      icon=excluded.icon, items=excluded.items, category=excluded.category
+      icon=excluded.icon, items=excluded.items, category=excluded.category, takeover=excluded.takeover
   `).run({
     id: b.id, studio: b.studio, title: b.title, name: b.name, email: b.email,
     description: b.description || '', isAdmin: b.admin ? 1 : 0, repeat: b.repeat || 'none',
@@ -385,7 +390,7 @@ function upsertBooking(b) {
     isPodcast: b.isPodcast ? 1 : 0, pendingCancel: b.pendingCancel ? 1 : 0,
     pendingApproval: b.pendingApproval ? 1 : 0, icon: b.icon || null,
     items: Array.isArray(b.items) && b.items.length ? JSON.stringify(b.items) : null,
-    category: b.category || null
+    category: b.category || null, takeover: b.takeover ? 1 : 0
   });
   return getBooking(b.id);
 }
@@ -393,6 +398,8 @@ function deleteBooking(id) { db.prepare('DELETE FROM bookings WHERE id = ?').run
 function setPendingCancel(id, value) { db.prepare('UPDATE bookings SET pending_cancel = ? WHERE id = ?').run(value ? 1 : 0, id); }
 // Not touched by upsertBooking, so an admin editing a booking doesn't silently drop a member's request.
 function setPendingChange(id, change) { db.prepare('UPDATE bookings SET pending_change = ? WHERE id = ?').run(change ? JSON.stringify(change) : null, id); }
+// Also not touched by upsertBooking, so editing a weekly show keeps its "No show" weeks.
+function setSkipDates(id, dates) { db.prepare('UPDATE bookings SET skip_dates = ? WHERE id = ?').run(dates && dates.length ? JSON.stringify(dates) : null, id); }
 
 // Sum of minutes already booked by this member as one-off (non-weekly) Studio Two
 // slots within [weekStartDate, weekEndDate], excluding a given booking id (for edits)
@@ -400,7 +407,7 @@ function setPendingChange(id, change) { db.prepare('UPDATE bookings SET pending_
 function djWeeklyMinutes(email, weekStartDate, weekEndDate, excludeId) {
   const row = db.prepare(`
     SELECT COALESCE(SUM(end_min - start_min), 0) AS mins FROM bookings
-    WHERE studio = 2 AND repeat != 'weekly' AND pending_approval = 0
+    WHERE studio = 2 AND repeat != 'weekly' AND pending_approval = 0 AND takeover = 0
       AND email = ? COLLATE NOCASE AND date >= ? AND date <= ? AND id != ?
   `).get(email, weekStartDate, weekEndDate, excludeId || '');
   return row.mins;
@@ -411,6 +418,14 @@ function djWeeklyMinutes(email, weekStartDate, weekEndDate, excludeId) {
 function absMin(dateStr, min) {
   const p = dateStr.split('-').map(Number);
   return Math.round(Date.UTC(p[0], p[1] - 1, p[2]) / 86400000) * 1440 + min;
+}
+// Is the airing of booking b that starts on date ds marked "No show", or replaced by a one-week override? (mirrors isOffAir in app.js)
+function isOffAir(b, ds) {
+  if ((b.skipDates || []).includes(ds)) return true;
+  if (b.takeover) return false;
+  const s = absMin(ds, b.startMin), e = absMin(ds, b.endMin);
+  return db.prepare('SELECT date, start_min, end_min FROM bookings WHERE takeover = 1 AND pending_approval = 0 AND studio = ?').all(b.studio)
+    .some(t => s < absMin(t.date, t.end_min) && absMin(t.date, t.start_min) < e);
 }
 // Roadshow bookings that share at least one item with the given range.
 function roadshowConflicts(itemIds, date, startMin, endMin, excludeId) {
@@ -559,7 +574,7 @@ module.exports = {
   createSession, getSessionExpiry, extendSession, deleteSession, purgeExpiredSessions,
   getSettings, saveSettings,
   listEquipment, getEquipment, addEquipment, updateEquipment, deleteEquipment,
-  listBookings, getBooking, upsertBooking, deleteBooking, setPendingCancel, setPendingChange, djWeeklyMinutes, roadshowConflicts,
+  listBookings, getBooking, upsertBooking, deleteBooking, setPendingCancel, setPendingChange, setSkipDates, djWeeklyMinutes, roadshowConflicts, isOffAir,
   listApprovedMembers, listPendingMembers, findMemberByEmail, insertMember, approveMember, deleteMember,
   getMember, setMediaMember,
   listCategories, categoryExists, addCategory, updateCategory, deleteCategory, moveCategory
